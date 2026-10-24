@@ -1,0 +1,136 @@
+name: Build debug APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: "ABI (arsitektur CPU)"
+        required: true
+        default: "mix"
+        type: choice
+        options:
+          - arm64-v8a
+          - armeabi-v7a
+          - mix
+          - split
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - '**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: "temurin"
+          cache: 'gradle'
+
+      - name: Repair & Download Official Gradle Wrapper
+        run: |
+          echo "=== Repairing Gradle Wrapper (Auto-downloading official Gradle) ==="
+          rm -f gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar
+
+          PROP_FILE="gradle/wrapper/gradle-wrapper.properties"
+          if [ -f "$PROP_FILE" ]; then
+            WRAPPER_URL=$(grep -o 'https.*\.zip' "$PROP_FILE" | sed 's/\\//g')
+          fi
+          WRAPPER_URL="${WRAPPER_URL:-https://services.gradle.org/distributions/gradle-9.3.1-bin.zip}"
+          echo "Fetching clean Gradle from: $WRAPPER_URL"
+
+          TMP_DIR=$(mktemp -d)
+          curl -sSL "$WRAPPER_URL" -o "$TMP_DIR/gradle.zip"
+          unzip -q -o "$TMP_DIR/gradle.zip" -d "$TMP_DIR"
+
+          GRADLE_BIN=$(find "$TMP_DIR" -type f -name gradle | head -1)
+          chmod +x "$GRADLE_BIN"
+          echo "Using official Gradle binary at: $GRADLE_BIN"
+
+          "$GRADLE_BIN" wrapper --gradle-version 9.3.1 --distribution-type bin
+          chmod +x gradlew
+          rm -rf "$TMP_DIR"
+
+          echo "Verifying newly installed Gradle wrapper:"
+          ./gradlew --version
+
+      - name: Accept SDK licenses
+        run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Patch ABI Configuration in build.gradle.kts
+        run: |
+          ABI="${{ inputs.abi || 'mix' }}"
+          python3 - app/build.gradle.kts "$ABI" <<'PYEOF'
+          import sys, re
+          path, abi = sys.argv[1], sys.argv[2]
+          content = open(path).read()
+
+          if abi == 'split':
+              content = re.sub(
+                  r'splits\s*\{[^}]*abi\s*\{[^}]*isEnable\s*=\s*(true|false)',
+                  'splits {\n    abi {\n      isEnable = true',
+                  content
+              )
+              content = re.sub(r'include\([^)]*\)', 'include("arm64-v8a", "armeabi-v7a")', content)
+          elif abi == 'mix':
+              content = re.sub(
+                  r'splits\s*\{[^}]*abi\s*\{[^}]*isEnable\s*=\s*(true|false)',
+                  'splits {\n    abi {\n      isEnable = false',
+                  content
+              )
+              content = re.sub(
+                  r'abiFilters\s*\+=\s*listOf\([^)]*\)',
+                  'abiFilters += listOf("arm64-v8a", "armeabi-v7a")',
+                  content
+              )
+          elif abi in ['arm64-v8a', 'armeabi-v7a']:
+              content = re.sub(
+                  r'splits\s*\{[^}]*abi\s*\{[^}]*isEnable\s*=\s*(true|false)',
+                  'splits {\n    abi {\n      isEnable = false',
+                  content
+              )
+              content = re.sub(
+                  r'abiFilters\s*\+=\s*listOf\([^)]*\)',
+                  f'abiFilters += listOf("{abi}")',
+                  content
+              )
+
+          open(path, 'w').write(content)
+          print(f"ABI configured successfully: {abi}")
+          PYEOF
+
+      - name: Build Debug APK & Run Tests
+        run: |
+          ./gradlew assembleDebug testDebugUnitTest --stacktrace
+
+      - name: Upload Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: '**/build/reports/tests/'
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload Debug APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apks-abi_${{ inputs.abi || 'mix' }}
+          path: app/build/outputs/apk/**/debug/*.apk
+          retention-days: 7
+          if-no-files-found: error
