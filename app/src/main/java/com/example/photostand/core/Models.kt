@@ -1,0 +1,122 @@
+// File: app/src/main/java/com/example/photostand/core/Models.kt
+package com.example.photostand.core
+
+import org.json.JSONObject
+
+// region Enums
+enum class AppMode {
+    UNSELECTED,
+    DISPLAY,
+    CONTROLLER
+}
+
+enum class FitMode {
+    CROP_FILL,
+    CONTAIN_LETTERBOX,
+    BLUR_BACKGROUND
+}
+
+enum class AnimationType {
+    PAPER_SCREEN,
+    TILE_GRID
+}
+
+enum class ConnectionType {
+    WIFI_MDNS,
+    BLE_BEACON,
+    DIRECT_IP
+}
+// endregion
+
+// region DisplayDevice Model
+data class DisplayDevice(
+    val id: String,
+    val name: String,
+    val ipAddress: String,
+    val port: Int = Constants.DEFAULT_HTTP_PORT,
+    val sharedKey: String = "",
+    val isOnline: Boolean = false,
+    val lastSeenTimestamp: Long = System.currentTimeMillis(),
+    val connectionType: ConnectionType = ConnectionType.WIFI_MDNS,
+    val bleRssi: Int? = null
+) {
+    fun toJson(): String {
+        val obj = JSONObject()
+        obj.put("id", id)
+        obj.put("name", name)
+        obj.put("ip", ipAddress)
+        obj.put("port", port)
+        obj.put("key", sharedKey)
+        obj.put("ts", lastSeenTimestamp)
+        return obj.toString()
+    }
+
+    companion object {
+        fun fromJson(jsonStr: String): DisplayDevice? {
+            return try {
+                val obj = JSONObject(jsonStr)
+                DisplayDevice(
+                    id = obj.getString("id"),
+                    name = obj.optString("name", "PhotoStand Display"),
+                    ipAddress = obj.optString("ip", ""),
+                    port = obj.optInt("port", Constants.DEFAULT_HTTP_PORT),
+                    sharedKey = obj.optString("key", ""),
+                    lastSeenTimestamp = obj.optLong("ts", System.currentTimeMillis())
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+}
+// endregion
+
+// region PairedController Model
+data class PairedController(
+    val controllerId: String,
+    val label: String,
+    val sharedKey: String,
+    val pairedAtTimestamp: Long = System.currentTimeMillis()
+) {
+    fun toJson(): String {
+        val obj = JSONObject()
+        obj.put("id", controllerId)
+        obj.put("label", label)
+        obj.put("key", sharedKey)
+        obj.put("ts", pairedAtTimestamp)
+        return obj.toString()
+    }
+
+    companion object {
+        fun fromJson(jsonStr: String): PairedController? {
+            return try {
+                val obj = JSONObject(jsonStr)
+                PairedController(
+                    controllerId = obj.getString("id"),
+                    label = obj.optString("label", "Controller"),
+                    sharedKey = obj.getString("key"),
+                    pairedAtTimestamp = obj.optLong("ts", System.currentTimeMillis())
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+}
+// endregion
+
+// region TransferPayload Model
+sealed class TransferResult {
+    data class Success(val message: String, val photoPath: String? = null) : TransferResult()
+    data class Failure(val errorMessage: String, val isTimeout: Boolean = false) : TransferResult()
+}
+
+data class TransferMetadata(
+    val version: Int = Constants.PROTOCOL_VERSION,
+    val senderDeviceId: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val signature: String,
+    val contentType: String = "image/jpeg",
+    val contentSizeBytes: Long
+)
+// endregion

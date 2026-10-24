@@ -1,0 +1,72 @@
+<resources>
+    <string name="app_name">PhotoStand</string>
+    <string name="tagline">Peer-to-peer digital photo display</string>
+
+    <!-- Navigation & Modes -->
+    <string name="mode_display">Display Mode</string>
+    <string name="mode_display_desc">Turn this device into a dedicated photo canvas</string>
+    <string name="mode_controller">Controller Mode</string>
+    <string name="mode_controller_desc">Send and manage photos on your displays</string>
+    <string name="switch_mode">Switch Mode</string>
+
+    <!-- Display Mode -->
+    <string name="display_waiting_photo">Waiting for photo…</string>
+    <string name="display_waiting_desc">Send a photo from Controller or Share sheet</string>
+    <string name="display_settings">Display Settings</string>
+    <string name="display_brightness">Brightness</string>
+    <string name="display_auto_dim">Auto-Dim (Night mode)</string>
+    <string name="display_auto_dim_desc">Dimmest from 23:00 to 07:00</string>
+    <string name="display_fit_mode">Fit Mode</string>
+    <string name="fit_crop">Fill (Crop)</string>
+    <string name="fit_contain">Fit (Letterbox)</string>
+    <string name="fit_blur">Blur Background</string>
+    <string name="display_animation">Reveal Animation</string>
+    <string name="anim_paper">Paper Screen (Blank → B&amp;W → Color)</string>
+    <string name="anim_tile">Tile Grid (Staggered scanline)</string>
+    <string name="display_clock_overlay">Clock &amp; Status</string>
+    <string name="display_keep_awake">Screen Keep Awake</string>
+    <string name="display_pairing_info">Pairing &amp; Network Info</string>
+    <string name="display_device_id">Device ID</string>
+    <string name="display_local_ip">Local Address</string>
+    <string name="display_port">Port</string>
+    <string name="display_qr_title">Pairing QR Code</string>
+    <string name="display_qr_instruction">Scan this with Controller or enter the token</string>
+    <string name="display_received_toast">New photo received!</string>
+
+    <!-- Controller Mode -->
+    <string name="controller_title">PhotoStand Controller</string>
+    <string name="controller_displays">My Displays</string>
+    <string name="controller_no_displays">No displays paired yet</string>
+    <string name="controller_no_displays_hint">Pair a device in Display mode to start sending photos</string>
+    <string name="controller_pair_button">Pair New Display</string>
+    <string name="controller_send_button">Select &amp; Send Photo</string>
+    <string name="controller_discovering">Scanning local network &amp; BLE…</string>
+    <string name="controller_status_online">Online</string>
+    <string name="controller_status_offline">Offline</string>
+    <string name="controller_rename_dialog">Rename Display</string>
+    <string name="controller_forget_dialog">Forget Display</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="confirm">Confirm</string>
+    <string name="delete">Delete</string>
+
+    <!-- Pairing -->
+    <string name="pairing_title">Pair a Display</string>
+    <string name="pairing_scan_tab">Scan / Enter Token</string>
+    <string name="pairing_discovered_tab">Discovered</string>
+    <string name="pairing_input_hint">Paste or enter pairing JSON / token</string>
+    <string name="pairing_paste_clipboard">Paste from Clipboard</string>
+    <string name="pairing_connect">Complete Pairing</string>
+    <string name="pairing_invalid_token">Invalid pairing token format</string>
+    <string name="pairing_success">Display paired successfully!</string>
+
+    <!-- Transfer & Errors -->
+    <string name="transfer_sending">Encrypting &amp; transferring photo…</string>
+    <string name="transfer_success">Photo printed to display!</string>
+    <string name="transfer_failed">Transfer failed</string>
+    <string name="transfer_timeout">Transfer timed out (30s). Check if display is awake and on same WiFi.</string>
+    <string name="transfer_device_offline">Target display is currently offline</string>
+    <string name="transfer_direct_prompt">Send directly via IP address</string>
+    <string name="pick_image">Choose Photo</string>
+    <string name="shared_image_detected">Shared photo ready to send</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "PhotoStand",
+  "description": "Peer-to-peer screen printer turning Android devices into digital photo displays with zero cloud friction.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
