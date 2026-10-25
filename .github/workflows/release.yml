@@ -59,29 +59,30 @@ jobs:
 
       - name: Repair & Download Official Gradle Wrapper
         run: |
-          echo "=== Repairing Gradle Wrapper (Auto-downloading official Gradle) ==="
-          rm -f gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar
+          echo "=== Verifying Gradle Wrapper ==="
+          if [ ! -f gradlew ]; then
+            PROP_FILE="gradle/wrapper/gradle-wrapper.properties"
+            if [ -f "$PROP_FILE" ]; then
+              WRAPPER_URL=$(grep -o 'https.*\.zip' "$PROP_FILE" | sed 's/\\//g')
+            fi
+            WRAPPER_URL="${WRAPPER_URL:-https://services.gradle.org/distributions/gradle-9.3.1-bin.zip}"
+            echo "Fetching clean Gradle from: $WRAPPER_URL"
 
-          PROP_FILE="gradle/wrapper/gradle-wrapper.properties"
-          if [ -f "$PROP_FILE" ]; then
-            WRAPPER_URL=$(grep -o 'https.*\.zip' "$PROP_FILE" | sed 's/\\//g')
+            TMP_DIR=$(mktemp -d)
+            curl -sSL "$WRAPPER_URL" -o "$TMP_DIR/gradle.zip"
+            unzip -q -o "$TMP_DIR/gradle.zip" -d "$TMP_DIR"
+
+            GRADLE_BIN=$(find "$TMP_DIR" -type f -name gradle | head -1)
+            chmod +x "$GRADLE_BIN"
+            echo "Using official Gradle binary at: $GRADLE_BIN"
+
+            "$GRADLE_BIN" wrapper --gradle-version 9.3.1 --distribution-type bin --no-daemon
+            "$GRADLE_BIN" --stop 2>/dev/null || true
+            rm -rf "$TMP_DIR"
           fi
-          WRAPPER_URL="${WRAPPER_URL:-https://services.gradle.org/distributions/gradle-9.3.1-bin.zip}"
-          echo "Fetching clean Gradle from: $WRAPPER_URL"
 
-          TMP_DIR=$(mktemp -d)
-          curl -sSL "$WRAPPER_URL" -o "$TMP_DIR/gradle.zip"
-          unzip -q -o "$TMP_DIR/gradle.zip" -d "$TMP_DIR"
-
-          GRADLE_BIN=$(find "$TMP_DIR" -type f -name gradle | head -1)
-          chmod +x "$GRADLE_BIN"
-          echo "Using official Gradle binary at: $GRADLE_BIN"
-
-          "$GRADLE_BIN" wrapper --gradle-version 9.3.1 --distribution-type bin
           chmod +x gradlew
-          rm -rf "$TMP_DIR"
-
-          echo "Verifying newly installed Gradle wrapper:"
+          echo "Verifying Gradle wrapper:"
           ./gradlew --version
 
       - name: Accept SDK licenses
