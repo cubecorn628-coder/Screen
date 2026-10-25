@@ -63,16 +63,33 @@ class QrEncoderTest {
         assertEquals(content, decode(matrix).text)
     }
 
+    /**
+     * Extract the byte-mode payload from ZXing's raw data codewords: the stream starts
+     * with a 4-bit mode indicator and an 8-bit character count (versions 1-9), i.e.
+     * 12 header bits, followed by the payload bytes and optional padding.
+     */
+    private fun byteModePayload(rawCodewords: ByteArray, length: Int): ByteArray {
+        val out = ByteArray(length)
+        for (i in 0 until length) {
+            var value = 0
+            for (bit in 0 until 8) {
+                val globalBit = 12 + i * 8 + bit
+                val sourceBit = (rawCodewords[globalBit / 8].toInt() ushr (7 - globalBit % 8)) and 1
+                value = (value shl 1) or sourceBit
+            }
+            out[i] = value.toByte()
+        }
+        return out
+    }
+
     @Test
     fun `encodes and decodes utf8`() {
         val content = "日本語 éèêë 🚀 QR テスト — pairing token".repeat(4)
+        val expectedBytes = content.toByteArray(Charsets.UTF_8)
         val matrix = QrEncoder.encode(content)
-        // Compare raw code bytes: ZXing's text conversion depends on the platform default
-        // charset, but byte-mode payload bytes must match our UTF-8 input exactly.
-        assertArrayEquals(
-            content.toByteArray(Charsets.UTF_8),
-            decode(matrix).rawBytes
-        )
+        // Compare raw payload bytes: ZXing's text conversion depends on the platform
+        // default charset, but byte-mode payload bytes must match our UTF-8 input exactly.
+        assertArrayEquals(expectedBytes, byteModePayload(decode(matrix).rawBytes, expectedBytes.size))
     }
 
     @Test
