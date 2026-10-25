@@ -102,6 +102,9 @@ Status: `[ ]` belum · `[~]` in progress · `[x]` done
 - [x] **Auto-connection trusted device**: device ber-pairing otomatis di-handshake ulang dan di-refresh endpoint-nya via mDNS/BLE/GATT; status online dari ping WiFi atau sighting BLE.
 - [x] **Keandalan transfer**: retry 2×, `retryOnConnectionFailure`, timeout 60 detik, verifikasi HMAC, antrian resolve mDNS (perbaikan ERROR_MAX_LIMIT), multicast lock ref-count.
 - [x] **Token pairing universal**: satu payload JSON untuk QR dan BLE GATT, memuat IP/port, shared key, dan BLE id.
+- [x] **Bug fatal penempatan data QR diperbaiki**: traversal zig-zag salah saat melewati kolom timing 6 — kolom 0 tidak pernah diisi dan kolom 4 ditulis dua kali, sehingga seluruh simbol QR korup dan tidak mungkin di-scan. Diperbaiki dengan me-rewind variabel loop kolom; `QrEncoderTest` (Robolectric + decoder internal ZXing) membuktikan round-trip bit-sempurna untuk ASCII, UTF-8 (emoji/aksen), dan token pairing nyata.
+- [x] **Kompatibilitas API BLE di compileSdk 36**: GATT server memakai `onCharacteristicReadRequest` + `sendResponse` (bukan callback client), client memakai `readCharacteristic` satu-argumen dengan hasil di callback; karakteristik mendukung offset blob read.
+- [x] **CI hijau**: `assembleDebug` + seluruh unit test (termasuk `QrEncoderTest`) lulus di GitHub Actions — PR #2.
 
 ### B. Advanced UI/UX & Interactive Canvas
 - [ ] **Dynamic Color Scheme (Monet Extraction)**
