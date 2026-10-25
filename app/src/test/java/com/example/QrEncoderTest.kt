@@ -1,118 +1,118 @@
-// File: app/src/test/java/com/example/QrEncoderTest.kt
+// File: app/src/test/java/com/example/QrEncoderTest/QrEncoderTest.kt
 package com.example
 
-import com.example.photostand.core.Constants
+import com.example.photostand.core.ConnectionType
 import com.example.photostand.core.DisplayDevice
-import com.example.photostand.p2p.pairing.QrEncoder
-import com.google.zxing.BinaryBitmap
-import com.google.zxing.DecodeHintType
-import com.google.zxing.LuminanceSource
-import com.google.zxing.MultiFormatReader
-import com.google.zxing.common.HybridBinarizer
+import com.example.photostand.p2p.qr.BooleanMatrix
+import com.example.photostand.p2p.qr.QrEncoder
+import com.example.photostand.p2p.qr.QrPayloadTooLargeException
+import com.google.zxing.common.BitMatrix
+import com.google.zxing.qrcode.decoder.Decoder
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
- * Validates the pure-Kotlin QR encoder by decoding its output with the independent
- * ZXing implementation. Covers ASCII, UTF-8 and the real pairing-token payload.
+ * Unit tests for the dependency-free QR encoder.
+ *
+ * Encoded symbols are validated by feeding them straight into ZXing's QR [Decoder],
+ * which performs the full format/version/EC/data decoding on a raw [BitMatrix] —
+ * no image binarization quirks involved. Robolectric is used because the pairing-token
+ * round-trip test exercises the Android `org.json` implementation.
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class QrEncoderTest {
 
-    private class BooleanMatrixSource(
-        matrix: QrEncoder.QrMatrix
-    ) : LuminanceSource(matrix.size + QUIET * 2, matrix.size + QUIET * 2) {
-        private val modules = Array(matrix.size) { y -> BooleanArray(matrix.size) { x -> matrix.isDark(y, x) } }
-        private val moduleCount = matrix.size
+    private val zxingDecoder = Decoder()
 
-        private fun luminanceAt(x: Int, y: Int): Byte {
-            if (x < QUIET || y < QUIET || x >= QUIET + moduleCount || y >= QUIET + moduleCount) {
-                return 255.toByte() // quiet zone is always white
+    /** Decode a [BooleanMatrix] (without quiet zone) using ZXing's internal QR decoder. */
+    private fun decode(matrix: BooleanMatrix): String {
+        val bits = BitMatrix(matrix.size, matrix.size)
+        for (y in 0 until matrix.size) {
+            for (x in 0 until matrix.size) {
+                if (matrix.get(y, x)) bits.set(x, y)
             }
-            return if (modules[y - QUIET][x - QUIET]) 0 else 255.toByte()
         }
+        return zxingDecoder.decode(bits).text
+    }
 
-        override fun getRow(y: Int, row: ByteArray?): ByteArray {
-            val result = row ?: ByteArray(width)
-            for (x in 0 until width) result[x] = luminanceAt(x, y)
-            return result
-        }
+    @Test
+    fun `picks smallest version and rejects oversize payload`() {
+        val small = QrEncoder.encode("hi")
+        assertTrue("version 1 is 21x21, was ${small.size}", small.size == 21)
 
-        override fun getMatrix(): ByteArray {
-            val pixels = ByteArray(width * height)
-            for (y in 0 until height) {
-                for (x in 0 until width) {
-                    pixels[y * width + x] = luminanceAt(x, y)
-                }
-            }
-            return pixels
-        }
+        val medium = QrEncoder.encode("A".repeat(60))
+        assertTrue("60 chars need more than version 1, was ${medium.size}", medium.size > 21)
 
-        override fun isCropSupported(): Boolean = false
-        override fun rotateCounterClockwise(): LuminanceSource =
-            throw UnsupportedOperationException()
-
-        companion object {
-            const val QUIET = 4
+        // Version 8-L byte-mode capacity is 181 bytes; 231 bytes cannot fit at all.
+        assertThrows(QrPayloadTooLargeException::class.java) {
+            QrEncoder.encode(String(ByteArray(231) { 'k'.code.toByte() }))
         }
     }
 
-    private fun decode(content: String): String {
+    @Test
+    fun `encodes and decodes ascii`() {
+        val content = "local-send style test 0123456789 abcdefghij ".repeat(8)
         val matrix = QrEncoder.encode(content)
-        val reader = MultiFormatReader().apply {
-            setHints(
-                mapOf(
-                    DecodeHintType.TRY_HARDER to true,
-                    DecodeHintType.CHARACTER_SET to Charsets.UTF_8.name()
-                )
-            )
-        }
-        val bitmap = BinaryBitmap(HybridBinarizer(BooleanMatrixSource(matrix)))
-        return reader.decode(bitmap).text
+        assertEquals(content, decode(matrix))
     }
 
     @Test
-    fun encodesAndDecodesAscii() {
-        val content = "HELLO PHOTOSTAND"
-        assertEquals(content, decode(content))
+    fun `encodes and decodes utf8`() {
+        val content = "日本語 éèêë 🚀 QR テスト — pairing token".repeat(4)
+        val matrix = QrEncoder.encode(content)
+        // ZXing's raw decoder returns the byte-mode payload as ISO-8859-1; re-interpret UTF-8.
+        val reparsed = String(decode(matrix).toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8)
+        assertEquals(content, reparsed)
     }
 
     @Test
-    fun encodesAndDecodesUtf8() {
-        val content = "日本語 éèêë 🚀 QR テスト"
-        assertEquals(content, decode(content))
+    fun `renders required finder and quiet-zone-free matrix correctly`() {
+        val matrix = QrEncoder.encode("finders")
+        // Top-left finder pattern: 7x7 dark border with a light ring.
+        assertTrue(matrix.get(0, 0))
+        assertTrue(matrix.get(6, 6))
+        assertTrue(!matrix.get(7, 7))
+        // Fixed module: top-right finder separated by a light separator.
+        assertTrue(!matrix.get(7, matrix.size - 8))
     }
 
     @Test
-    fun encodesRealPairingToken() {
-        val token = DisplayDevice(
-            id = "ps-a1b2c3d4e5f6",
-            name = "PhotoStand Pixel Tablet",
-            ipAddress = "192.168.1.100",
-            port = Constants.DEFAULT_HTTP_PORT,
-            sharedKey = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=",
-            bleId = "a1b2c3d4e5f6"
-        ).toPairingToken()
+    fun `encodes real pairing token and stays under version 8`() {
+        val display = DisplayDevice(
+            id = "display-aabbccddeeff",
+            name = "PhotoStand Ruang Tamu",
+            ipAddress = "192.168.1.42",
+            port = 9876,
+            sharedKey = "f9c8174a9b03d5e6f2148ab7c0d3e5f6a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            bleId = "aabbccddeeff",
+            connectionType = ConnectionType.WIFI_MDNS,
+            autoConnect = true
+        )
+        val token = display.toPairingToken()
+        assertTrue("token must fit version 8-L (181 bytes), was ${token.toByteArray().size}",
+            token.toByteArray().size <= 181)
 
-        assertTrue("token must fit the v9-L byte-mode envelope", token.toByteArray().size <= 230)
-        val decoded = decode(token)
-        val reparsed = DisplayDevice.fromJson(decoded)
+        val matrix = QrEncoder.encode(token)
+        assertTrue("must fit version 8 (49 modules), was ${matrix.size}", matrix.size <= 49)
+
+        val reparsed = DisplayDevice.fromJson(decode(matrix))
+        assertNotNull(reparsed)
         assertEquals(token, reparsed?.toPairingToken())
-        assertEquals("a1b2c3d4e5f6", reparsed?.bleId)
     }
 
     @Test
-    fun picksSmallestVersionAndRejectsOversize() {
-        val small = QrEncoder.encode("1")
-        assertEquals(21, small.size) // version 1 matrix
-
-        val overflow = ByteArray(231) { 'k'.code.toByte() }
-        var threw = false
-        try {
-            QrEncoder.encode(String(overflow))
-        } catch (e: QrEncoder.PayloadTooLargeException) {
-            threw = true
+    fun `same input always produces identical matrix`() {
+        val a = QrEncoder.encode("deterministic-123")
+        val b = QrEncoder.encode("deterministic-123")
+        for (y in 0 until a.size) for (x in 0 until a.size) {
+            assertEquals(a.get(y, x), b.get(y, x))
         }
-        assertTrue(threw)
     }
 }
