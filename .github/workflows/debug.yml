@@ -29,6 +29,8 @@ jobs:
   build:
     name: Build & Test
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -144,6 +146,14 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           grep -E "^e: |error:|FAILURE:|What went wrong|Caused by|ApplicationManager|Cannot invoke" build-output.log | head -80 >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
+          # Also commit the filtered log so it is readable through the GitHub API.
+          mkdir -p ci-logs
+          grep -E "^e: |error:|FAILURE:|What went wrong|Caused by|ApplicationManager|Cannot invoke|> Task" build-output.log | head -200 > ci-logs/build-errors.log || true
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add ci-logs/build-errors.log
+          git commit -m "ci: simpan log error build [skip ci]" || true
+          git push origin HEAD:${{ github.head_ref || github.ref_name }} || true
           exit 1
 
       - name: Upload Test Reports
