@@ -150,14 +150,16 @@ fun QrScannerScreen(
                                 it.setSurfaceProvider(previewView.surfaceProvider)
                             }
 
-                            val reader = MultiFormatReader().apply {
-                                setHints(
-                                    mapOf(
-                                        DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-                                        DecodeHintType.TRY_HARDER to true
-                                    )
-                                )
-                            }
+            val reader = MultiFormatReader().apply {
+                setHints(
+                    mapOf(
+                        DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                        DecodeHintType.TRY_HARDER to true,
+                        // Pairing tokens are UTF-8; ZXing otherwise assumes ISO-8859-1.
+                        DecodeHintType.CHARACTER_SET to Charsets.UTF_8.name()
+                    )
+                )
+            }
 
                             val analysis = ImageAnalysis.Builder()
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)

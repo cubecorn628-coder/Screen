@@ -148,7 +148,11 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           # Also commit the filtered log so it is readable through the GitHub API.
           mkdir -p ci-logs
-          grep -E "^e: |error:|FAILURE:|What went wrong|Caused by|ApplicationManager|Cannot invoke|> Task" build-output.log | head -200 > ci-logs/build-errors.log || true
+          {
+            grep -E "^e: |error:|FAILURE:|What went wrong|Caused by|ApplicationManager|Cannot invoke|> Task|FAILED|AssertionError|expected:|but was:|Tests? " build-output.log | head -300 || true
+            echo "===== JUnit XML failures ====="
+            grep -E "<failure|<error" -A 8 app/build/test-results/testDebugUnitTest/*.xml 2>/dev/null || true
+          } > ci-logs/build-errors.log
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
           git add ci-logs/build-errors.log

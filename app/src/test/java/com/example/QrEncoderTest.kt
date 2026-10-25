@@ -60,7 +60,12 @@ class QrEncoderTest {
     private fun decode(content: String): String {
         val matrix = QrEncoder.encode(content)
         val reader = MultiFormatReader().apply {
-            setHints(mapOf(DecodeHintType.TRY_HARDER to true))
+            setHints(
+                mapOf(
+                    DecodeHintType.TRY_HARDER to true,
+                    DecodeHintType.CHARACTER_SET to Charsets.UTF_8.name()
+                )
+            )
         }
         val bitmap = BinaryBitmap(HybridBinarizer(BooleanMatrixSource(matrix)))
         return reader.decode(bitmap).text
