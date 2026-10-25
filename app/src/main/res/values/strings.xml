@@ -33,6 +33,22 @@
     <string name="display_qr_instruction">Scan this with Controller or enter the token</string>
     <string name="display_received_toast">New photo received!</string>
 
+    <!-- Always-On Display -->
+    <string name="aod_title">Always-On Display (AOD)</string>
+    <string name="aod_desc">Pure-black ambient clock with anti burn-in pixel shift</string>
+    <string name="aod_night_red">Red night vision</string>
+    <string name="aod_night_red_desc">Dim red monochrome palette between 23:00 and 07:00</string>
+    <string name="aod_timeout">Wake to ambient after %1$d s idle</string>
+    <string name="aod_hint">Tap the screen once to wake from AOD. New photos wake it automatically.</string>
+
+    <!-- QR Scanner -->
+    <string name="scanner_title">Scan Pairing QR</string>
+    <string name="scanner_hint">Point the camera at the QR code shown on the Display</string>
+    <string name="scanner_manual">Enter token manually</string>
+    <string name="scanner_open">Open QR Scanner</string>
+    <string name="scanner_permission_needed">Camera permission is required to scan pairing QR codes</string>
+    <string name="scanner_grant_permission">Grant camera permission</string>
+
     <!-- Controller Mode -->
     <string name="controller_title">PhotoStand Controller</string>
     <string name="controller_displays">My Displays</string>

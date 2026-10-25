@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class MdnsDiscovery(
     private val context: Context,
@@ -31,8 +33,20 @@ class MdnsDiscovery(
     private var isDiscovering = false
     private var isRegistered = false
 
+    // NsdManager only allows ONE outstanding resolve at a time. Serialise all resolves
+    // through this mutex + queue instead of firing parallel resolveService() calls
+    // (which previously failed with ERROR_MAX_LIMIT on many devices and lost devices).
+    private val resolveMutex = Mutex()
+    private val resolveQueue = ArrayDeque<NsdServiceInfo>()
+    private val queuedServices = HashSet<String>()
+
     // region Display Service Registration
-    fun registerDisplayService(deviceId: String, deviceName: String, port: Int) {
+    fun registerDisplayService(
+        deviceId: String,
+        deviceName: String,
+        port: Int,
+        bleId: String = ""
+    ) {
         if (nsdManager == null) return
         unregisterDisplayService()
 
@@ -45,6 +59,7 @@ class MdnsDiscovery(
             setAttribute("id", deviceId)
             setAttribute("name", deviceName)
             setAttribute("v", Constants.PROTOCOL_VERSION.toString())
+            if (bleId.isNotBlank()) setAttribute("ble", bleId)
         }
 
         registrationListener = object : NsdManager.RegistrationListener {
@@ -86,6 +101,7 @@ class MdnsDiscovery(
                 isRegistered = false
             }
         }
+        NetworkUtils.releaseMulticastLock()
     }
     // endregion
 
@@ -102,8 +118,10 @@ class MdnsDiscovery(
 
             override fun onServiceFound(service: NsdServiceInfo?) {
                 if (service == null) return
-                if (service.serviceType.contains("photostand") || service.serviceName.startsWith(Constants.MDNS_SERVICE_NAME_PREFIX)) {
-                    resolveService(service)
+                if (service.serviceType.contains("photostand") ||
+                    service.serviceName.startsWith(Constants.MDNS_SERVICE_NAME_PREFIX)
+                ) {
+                    enqueueResolve(service)
                 }
             }
 
@@ -111,7 +129,9 @@ class MdnsDiscovery(
                 if (service == null) return
                 scope.launch(Dispatchers.IO) {
                     val current = _discoveredDisplays.value.toMutableList()
-                    val toRemove = current.filter { it.name == service.serviceName || service.serviceName.contains(it.id) }
+                    val toRemove = current.filter {
+                        it.name == service.serviceName || service.serviceName.contains(it.id)
+                    }
                     if (toRemove.isNotEmpty()) {
                         current.removeAll(toRemove)
                         _discoveredDisplays.value = current
@@ -136,14 +156,38 @@ class MdnsDiscovery(
         }
 
         try {
-            nsdManager.discoverServices(Constants.MDNS_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+            nsdManager.discoverServices(
+                Constants.MDNS_SERVICE_TYPE,
+                NsdManager.PROTOCOL_DNS_SD,
+                discoveryListener
+            )
         } catch (e: Exception) {
             Log.e(tag, "Exception starting mDNS discovery", e)
             isDiscovering = false
         }
     }
 
+    private fun enqueueResolve(serviceInfo: NsdServiceInfo) {
+        scope.launch(Dispatchers.IO) {
+            resolveMutex.withLock {
+                val key = serviceInfo.serviceName
+                if (queuedServices.contains(key)) return@withLock
+                queuedServices.add(key)
+                try {
+                    resolveQueue.addLast(serviceInfo)
+                    while (resolveQueue.isNotEmpty()) {
+                        val next = resolveQueue.removeFirst()
+                        resolveService(next)
+                    }
+                } finally {
+                    queuedServices.remove(key)
+                }
+            }
+        }
+    }
+
     private fun resolveService(serviceInfo: NsdServiceInfo) {
+        val nsd = nsdManager ?: return
         val resolveListener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(service: NsdServiceInfo?, errorCode: Int) {
                 Log.w(tag, "Resolve failed for ${service?.serviceName}: $errorCode")
@@ -157,6 +201,7 @@ class MdnsDiscovery(
                 val deviceId = attributes["id"]?.let { String(it) }
                     ?: resolved.serviceName.removePrefix(Constants.MDNS_SERVICE_NAME_PREFIX)
                 val deviceName = attributes["name"]?.let { String(it) } ?: resolved.serviceName
+                val bleId = attributes["ble"]?.let { String(it) } ?: ""
 
                 scope.launch(Dispatchers.IO) {
                     val device = DisplayDevice(
@@ -166,13 +211,18 @@ class MdnsDiscovery(
                         port = port,
                         isOnline = true,
                         lastSeenTimestamp = System.currentTimeMillis(),
-                        connectionType = ConnectionType.WIFI_MDNS
+                        connectionType = ConnectionType.WIFI_MDNS,
+                        bleId = bleId
                     )
 
                     val current = _discoveredDisplays.value.toMutableList()
                     val index = current.indexOfFirst { it.id == device.id }
                     if (index >= 0) {
-                        current[index] = device
+                        // Preserve anything learned from BLE/GATT when refreshing.
+                        current[index] = device.copy(
+                            bleId = bleId.ifBlank { current[index].bleId },
+                            bleRssi = current[index].bleRssi
+                        )
                     } else {
                         current.add(device)
                     }
@@ -182,7 +232,7 @@ class MdnsDiscovery(
         }
 
         try {
-            nsdManager?.resolveService(serviceInfo, resolveListener)
+            nsd.resolveService(serviceInfo, resolveListener)
         } catch (e: Exception) {
             Log.e(tag, "Exception resolving mDNS service", e)
         }
@@ -197,6 +247,8 @@ class MdnsDiscovery(
             } finally {
                 discoveryListener = null
                 isDiscovering = false
+                resolveQueue.clear()
+                queuedServices.clear()
             }
         }
         NetworkUtils.releaseMulticastLock()

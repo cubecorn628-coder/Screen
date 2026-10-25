@@ -2,6 +2,9 @@
 package com.example.photostand.display
 
 import android.app.Application
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.photostand.core.AnimationType
@@ -9,6 +12,7 @@ import com.example.photostand.core.Constants
 import com.example.photostand.core.DisplayDevice
 import com.example.photostand.core.FitMode
 import com.example.photostand.p2p.NetworkUtils
+import com.example.photostand.p2p.discovery.BleGattServer
 import com.example.photostand.p2p.discovery.BlePresence
 import com.example.photostand.p2p.discovery.MdnsDiscovery
 import com.example.photostand.p2p.pairing.PairingStore
@@ -42,18 +46,26 @@ data class DisplayUiState(
     val showPairingQrDialog: Boolean = false,
     val deviceId: String = "",
     val deviceName: String = "",
+    val bleId: String = "",
     val localIp: String = "127.0.0.1",
     val port: Int = Constants.DEFAULT_HTTP_PORT,
     val pairingToken: String = "",
     val newPhotoTrigger: Long = 0L,
     val isServerRunning: Boolean = false,
-    val isWifiConnected: Boolean = true
+    val isWifiConnected: Boolean = true,
+    val batteryPercent: Int? = null,
+    // Always-On Display
+    val aodEnabled: Boolean = true,
+    val aodNightRed: Boolean = true,
+    val aodTimeoutSeconds: Int = Constants.AOD_DEFAULT_TIMEOUT_SECONDS,
+    val aodActive: Boolean = false,
+    val bluetoothEnabled: Boolean = true
 )
 
 class DisplayViewModel(application: Application) : AndroidViewModel(application) {
     private val pairingStore = PairingStore(application)
     private val mdnsDiscovery = MdnsDiscovery(application, viewModelScope)
-    private val blePresence = BlePresence(application)
+    private val blePresence = BlePresence(application, viewModelScope)
 
     private val database = PhotoStandDatabase.getDatabase(application)
     val photoRepository = SharedPhotoRepository(database.sharedPhotoDao())
@@ -73,7 +85,11 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
             animationType = pairingStore.getAnimationType(),
             showClock = pairingStore.isShowClock(),
             deviceId = pairingStore.getOrCreateDeviceId(),
-            deviceName = pairingStore.getDeviceName()
+            deviceName = pairingStore.getDeviceName(),
+            bleId = pairingStore.getOrCreateBleId(),
+            aodEnabled = pairingStore.isAodEnabled(),
+            aodNightRed = pairingStore.isAodNightRedEnabled(),
+            aodTimeoutSeconds = pairingStore.getAodTimeoutSeconds()
         )
     )
     val uiState: StateFlow<DisplayUiState> = _uiState.asStateFlow()
@@ -83,15 +99,22 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
         pairingStore = pairingStore,
         photoRepository = photoRepository,
         scope = viewModelScope,
-        onPhotoReceived = { path ->
-            onNewPhotoReceived(path)
-        }
+        onPhotoReceived = { path -> onNewPhotoReceived(path) }
     )
+
+    // Serves the exact pairing token rendered as the on-screen QR code.
+    private val gattServer = BleGattServer(application) { _uiState.value.pairingToken }
 
     init {
         observeLatestPhoto()
         startServices()
         startAutoDimScheduler()
+        loadBatteryLevel()
+        viewModelScope.launch {
+            blePresence.bluetoothEnabled.collect { enabled ->
+                _uiState.update { it.copy(bluetoothEnabled = enabled) }
+            }
+        }
     }
 
     private fun observeLatestPhoto() {
@@ -109,7 +132,9 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
     private fun loadFallbackDiskPhoto() {
         val photosDir = File(getApplication<Application>().filesDir, "photos")
         if (photosDir.exists()) {
-            val photos = photosDir.listFiles { file -> file.isFile && (file.name.endsWith(".jpg") || file.name.endsWith(".png")) }
+            val photos = photosDir.listFiles { file ->
+                file.isFile && (file.name.endsWith(".jpg") || file.name.endsWith(".png"))
+            }
             val latest = photos?.maxByOrNull { it.lastModified() }
             if (latest != null) {
                 _uiState.update { it.copy(currentPhotoPath = latest.absolutePath) }
@@ -122,26 +147,25 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
             val ip = NetworkUtils.getLocalIpAddress()
             val deviceId = pairingStore.getOrCreateDeviceId()
             val deviceName = pairingStore.getDeviceName()
+            val bleId = pairingStore.getOrCreateBleId()
             val secret = pairingStore.getOrCreateDeviceSecret()
             val port = Constants.DEFAULT_HTTP_PORT
             val isWifi = NetworkUtils.isWifiConnected(getApplication())
 
             val pairingDevice = DisplayDevice(
                 id = deviceId,
-                name = deviceName,
+                // Keep the QR/GATT token compact: long names would grow the JSON payload.
+                name = deviceName.take(32),
                 ipAddress = ip,
                 port = port,
-                sharedKey = secret
+                sharedKey = secret,
+                bleId = bleId
             )
 
-            // Start HTTP Receive Server
             receiveServer.start(port)
-
-            // Start mDNS Registration
-            mdnsDiscovery.registerDisplayService(deviceId, deviceName, port)
-
-            // Start BLE Presence Broadcast
-            blePresence.startAdvertising(deviceId)
+            mdnsDiscovery.registerDisplayService(deviceId, deviceName, port, bleId)
+            blePresence.startAdvertising(bleId, port)
+            gattServer.start()
 
             _uiState.update {
                 it.copy(
@@ -149,7 +173,8 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
                     port = port,
                     deviceId = deviceId,
                     deviceName = deviceName,
-                    pairingToken = pairingDevice.toJson(),
+                    bleId = bleId,
+                    pairingToken = pairingDevice.toPairingToken(),
                     isServerRunning = receiveServer.isRunning,
                     isWifiConnected = isWifi,
                     effectiveBrightness = computeEffectiveBrightness(it.brightness, it.autoDimEnabled)
@@ -160,10 +185,12 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
 
     private fun onNewPhotoReceived(path: String) {
         viewModelScope.launch(Dispatchers.Main) {
+            // A new photo always wakes the display out of AOD.
             _uiState.update {
                 it.copy(
                     currentPhotoPath = path,
-                    newPhotoTrigger = System.currentTimeMillis()
+                    newPhotoTrigger = System.currentTimeMillis(),
+                    aodActive = false
                 )
             }
         }
@@ -217,22 +244,67 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
 
     fun updateDeviceName(name: String) {
         pairingStore.setDeviceName(name)
-        _uiState.update { it.copy(deviceName = name) }
-        // Re-announce mDNS
-        mdnsDiscovery.registerDisplayService(uiState.value.deviceId, name, uiState.value.port)
+        _uiState.update {
+            it.copy(
+                deviceName = name,
+                pairingToken = it.pairingToken
+            )
+        }
+        // Re-announce mDNS + rebuild token so BLE/QR stay in sync.
+        startServices()
+    }
+    // endregion
+
+    // region Always-On Display
+    fun setAodEnabled(enabled: Boolean) {
+        pairingStore.setAodEnabled(enabled)
+        _uiState.update { it.copy(aodEnabled = enabled, aodActive = if (enabled) it.aodActive else false) }
+    }
+
+    fun setAodNightRed(enabled: Boolean) {
+        pairingStore.setAodNightRedEnabled(enabled)
+        _uiState.update { it.copy(aodNightRed = enabled) }
+    }
+
+    fun setAodTimeoutSeconds(seconds: Int) {
+        pairingStore.setAodTimeoutSeconds(seconds)
+        _uiState.update { it.copy(aodTimeoutSeconds = seconds) }
+    }
+
+    fun setAodActive(active: Boolean) {
+        _uiState.update { it.copy(aodActive = active) }
+    }
+
+    fun isNightTime(): Boolean {
+        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        return hour >= Constants.AUTO_DIM_START_HOUR || hour < Constants.AUTO_DIM_END_HOUR
     }
     // endregion
 
     private fun startAutoDimScheduler() {
         viewModelScope.launch {
             while (isActive) {
-                delay(60_000L) // Check every minute
+                delay(60_000L)
                 val current = _uiState.value
                 val newEffective = computeEffectiveBrightness(current.brightness, current.autoDimEnabled)
                 if (newEffective != current.effectiveBrightness) {
                     _uiState.update { it.copy(effectiveBrightness = newEffective) }
                 }
             }
+        }
+    }
+
+    private fun loadBatteryLevel() {
+        try {
+            val context = getApplication<Application>()
+            val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            if (level >= 0 && scale > 0) {
+                _uiState.update { it.copy(batteryPercent = (level * 100 / scale)) }
+            }
+        } catch (e: Exception) {
+            // Battery info is optional; ignore.
         }
     }
 
@@ -248,5 +320,6 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
         receiveServer.stop()
         mdnsDiscovery.unregisterDisplayService()
         blePresence.stopAdvertising()
+        gattServer.stop()
     }
 }
