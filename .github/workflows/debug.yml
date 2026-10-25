@@ -130,8 +130,21 @@ jobs:
           PYEOF
 
       - name: Build Debug APK & Run Tests
+        id: build
+        continue-on-error: true
         run: |
-          ./gradlew assembleDebug testDebugUnitTest --stacktrace
+          ./gradlew assembleDebug testDebugUnitTest --stacktrace 2>&1 | tee build-output.log
+          # Preserve the real Gradle exit code through the tee pipe.
+          exit ${PIPESTATUS[0]}
+
+      - name: Publish build errors to job summary
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "## Build failure" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E "^e: |error:|FAILURE:|What went wrong|Caused by|ApplicationManager|Cannot invoke" build-output.log | head -80 >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          exit 1
 
       - name: Upload Test Reports
         if: always()
