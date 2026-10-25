@@ -18,43 +18,54 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.io.InputStream
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
+
+/** Result of a pairing handshake; carries the negotiated key back to the caller. */
+data class HandshakeResult(
+    val success: Boolean,
+    val displayId: String = "",
+    val displayName: String = "",
+    val sharedKey: String = "",
+    val bleId: String = ""
+)
 
 class PhotoTransferClient(private val context: Context) {
     private val tag = "PhotoTransferClient"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS) // 30s timeout per specification
-        .readTimeout(30, TimeUnit.SECONDS)
+        // Real-world photo transfers on congested WiFi need headroom beyond 30s.
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
-    // region Check Online Status
     suspend fun pingDisplay(display: DisplayDevice): Boolean = withContext(Dispatchers.IO) {
         if (display.ipAddress.isBlank()) return@withContext false
         val url = "http://${display.ipAddress}:${display.port}/api/v1/ping"
         try {
             val request = Request.Builder().url(url).get().build()
-            client.newCall(request).execute().use { response ->
-                return@withContext response.isSuccessful
-            }
+            client.newCall(request).execute().use { response -> response.isSuccessful }
         } catch (e: Exception) {
-            return@withContext false
+            false
         }
     }
-    // endregion
 
-    // region Handshake
+    /**
+     * Registers this controller with the display. The display replies with the negotiated
+     * shared key and its BLE identity, which the caller persists for trusted auto-connect.
+     */
     suspend fun performHandshake(
         display: DisplayDevice,
         controllerId: String,
         controllerLabel: String
-    ): Boolean = withContext(Dispatchers.IO) {
-        if (display.ipAddress.isBlank()) return@withContext false
+    ): HandshakeResult = withContext(Dispatchers.IO) {
+        if (display.ipAddress.isBlank()) {
+            return@withContext HandshakeResult(false)
+        }
         val url = "http://${display.ipAddress}:${display.port}/api/v1/handshake"
-
         try {
             val payload = JSONObject().apply {
                 put("controllerId", controllerId)
@@ -63,79 +74,94 @@ class PhotoTransferClient(private val context: Context) {
             }.toString()
 
             val body = payload.toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url(url)
-                .post(body)
-                .build()
+            val request = Request.Builder().url(url).post(body).build()
 
             client.newCall(request).execute().use { response ->
-                return@withContext response.isSuccessful
+                if (!response.isSuccessful) return@withContext HandshakeResult(false)
+                val json = JSONObject(response.body?.string().orEmpty())
+                HandshakeResult(
+                    success = true,
+                    displayId = json.optString("displayId", display.id),
+                    displayName = json.optString("displayName", display.name),
+                    sharedKey = json.optString("key", display.sharedKey),
+                    bleId = json.optString("ble", display.bleId)
+                )
             }
         } catch (e: Exception) {
             Log.e(tag, "Handshake failed", e)
-            return@withContext false
+            HandshakeResult(false)
         }
     }
-    // endregion
 
-    // region Photo Transfer
     suspend fun sendPhoto(
         display: DisplayDevice,
         senderDeviceId: String,
         imageBytes: ByteArray
     ): TransferResult = withContext(Dispatchers.IO) {
         if (display.ipAddress.isBlank()) {
-            return@withContext TransferResult.Failure("Target display IP is missing", isTimeout = false)
+            return@withContext TransferResult.Failure(
+                "No network address for ${display.name}. Pair it over WiFi or BLE first.",
+                isTimeout = false
+            )
         }
 
         val url = "http://${display.ipAddress}:${display.port}/api/v1/transfer"
 
-        try {
-            // Compress image if larger than 2MB as specified in PROJECT.MD
-            val optimizedBytes = compressIfLarge(imageBytes)
-
-            // Encrypt using AES-GCM
-            val encryptedBytes = try {
-                if (display.sharedKey.isNotBlank()) {
-                    PairingCrypto.encrypt(optimizedBytes, display.sharedKey)
-                } else {
-                    optimizedBytes
-                }
-            } catch (e: Exception) {
+        val optimizedBytes = compressIfLarge(imageBytes)
+        val encryptedBytes = try {
+            if (display.sharedKey.isNotBlank()) {
+                PairingCrypto.encrypt(optimizedBytes, display.sharedKey)
+            } else {
                 optimizedBytes
             }
+        } catch (e: Exception) {
+            optimizedBytes
+        }
 
+        var lastError: String? = null
+        var wasTimeout = false
+
+        // Retry transient failures (connection reset, half-open socket, brief AP hiccup).
+        repeat(Constants.TRANSFER_MAX_RETRIES) { attempt ->
             val timestamp = System.currentTimeMillis()
             val signature = if (display.sharedKey.isNotBlank()) {
-                PairingCrypto.calculateHmac("$senderDeviceId:$timestamp:${encryptedBytes.size}", display.sharedKey)
-            } else {
-                ""
-            }
+                PairingCrypto.calculateHmac(
+                    "$senderDeviceId:$timestamp:${encryptedBytes.size}",
+                    display.sharedKey
+                )
+            } else ""
 
-            val body = encryptedBytes.toRequestBody("application/octet-stream".toMediaType())
+            val requestBody = encryptedBytes.toRequestBody("application/octet-stream".toMediaType())
             val request = Request.Builder()
                 .url(url)
-                .post(body)
+                .post(requestBody)
                 .header("X-Sender-Device-Id", senderDeviceId)
                 .header("X-Timestamp", timestamp.toString())
                 .header("X-Signature", signature)
                 .build()
 
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    TransferResult.Success("Photo printed to display successfully!")
-                } else {
-                    val errorBody = response.body?.string() ?: ""
-                    TransferResult.Failure("Display rejected transfer (HTTP ${response.code}): $errorBody", isTimeout = false)
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        return@withContext TransferResult.Success("Photo printed to ${display.name}!")
+                    }
+                    val errorBody = response.body?.string().orEmpty()
+                    lastError = "Display rejected transfer (HTTP ${response.code}): $errorBody"
+                    // 4xx (auth/protocol) errors will not improve on retry.
+                    if (response.code in 400..499) {
+                        return@withContext TransferResult.Failure(lastError!!, isTimeout = false)
+                    }
                 }
+            } catch (e: SocketTimeoutException) {
+                wasTimeout = true
+                lastError = "Transfer timed out. Check that ${display.name} is awake and reachable."
+                Log.e(tag, "Transfer timed out (attempt ${attempt + 1})", e)
+            } catch (e: IOException) {
+                lastError = "Connection failed: ${e.localizedMessage ?: "network error"}"
+                Log.e(tag, "Transfer failed (attempt ${attempt + 1})", e)
             }
-        } catch (e: SocketTimeoutException) {
-            Log.e(tag, "Transfer timed out", e)
-            TransferResult.Failure("Transfer timed out after 30 seconds. Check display WiFi connection.", isTimeout = true)
-        } catch (e: Exception) {
-            Log.e(tag, "Transfer failed", e)
-            TransferResult.Failure("Connection failed: ${e.localizedMessage ?: "Unknown network error"}", isTimeout = false)
         }
+        TransferResult.Failure(lastError ?: "Unknown transfer error", isTimeout = wasTimeout)
     }
 
     suspend fun readBytesFromUri(uri: Uri): ByteArray? = withContext(Dispatchers.IO) {
@@ -156,13 +182,10 @@ class PhotoTransferClient(private val context: Context) {
     }
 
     private fun compressIfLarge(rawBytes: ByteArray): ByteArray {
-        if (rawBytes.size <= 2 * 1024 * 1024) {
-            return rawBytes // Already under 2MB
-        }
+        if (rawBytes.size <= 2 * 1024 * 1024) return rawBytes
         return try {
             val bitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return rawBytes
             val stream = ByteArrayOutputStream()
-            // Compress with high quality WebP/JPEG
             bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
             val compressed = stream.toByteArray()
             if (compressed.size < rawBytes.size) compressed else rawBytes
@@ -170,5 +193,4 @@ class PhotoTransferClient(private val context: Context) {
             rawBytes
         }
     }
-    // endregion
 }

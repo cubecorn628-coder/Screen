@@ -20,3 +20,11 @@
 # Coil Image Loader
 -keep class coil.** { *; }
 -dontwarn coil.**
+
+# ZXing QR decoder
+-keep class com.google.zxing.** { *; }
+-dontwarn com.google.zxing.**
+
+# CameraX
+-keep class androidx.camera.** { *; }
+-dontwarn androidx.camera.**
