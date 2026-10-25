@@ -7,7 +7,6 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
 import android.util.Log
@@ -171,15 +170,11 @@ class BleGattClient(
     @SuppressLint("MissingPermission")
     private fun readToken(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val status = gatt.readCharacteristic(characteristic, ByteArray(512))
-                if (status != BluetoothStatusCodes.SUCCESS) {
-                    Log.w(tag, "readCharacteristic returned $status")
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                gatt.readCharacteristic(characteristic)
-            }
+            // The single-arg read works on every API level; on API 33+ its result is
+            // delivered through the memory-safe onCharacteristicRead(...,value,status).
+            @Suppress("DEPRECATION")
+            val queued = gatt.readCharacteristic(characteristic)
+            if (!queued) Log.w(tag, "readCharacteristic was not queued")
         } catch (e: SecurityException) {
             Log.w(tag, "Missing BLUETOOTH_CONNECT", e)
             closeGatt()

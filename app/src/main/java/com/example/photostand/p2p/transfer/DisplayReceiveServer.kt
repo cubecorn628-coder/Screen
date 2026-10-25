@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -230,7 +231,8 @@ class DisplayReceiveServer(
                         fileSizeBytes = decryptedBytes.size.toLong(),
                         mimeType = "image/jpeg"
                     )
-                    photoRepository.savePhoto(photoEntity)
+                    // This socket handler is already on Dispatchers.IO; bridge the suspend DAO.
+                    runBlocking { photoRepository.savePhoto(photoEntity) }
 
                     val resp = JSONObject().apply {
                         put("status", "received")

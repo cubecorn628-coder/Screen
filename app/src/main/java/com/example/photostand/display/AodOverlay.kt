@@ -1,8 +1,8 @@
 // File: app/src/main/java/com/example/photostand/display/AodOverlay.kt
 package com.example.photostand.display
 
-import androidx.compose.animation.animateIntOffsetAsState
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateIntOffsetAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement

@@ -10,9 +10,7 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.content.Context
-import android.os.Build
 import android.util.Log
-
 import com.example.photostand.core.Constants
 import java.util.UUID
 
@@ -74,24 +72,36 @@ class BleGattServer(
                 Log.d(tag, "GATT connection state: $status -> $newState")
             }
 
-            // API 33+: request id is provided explicitly.
-            override fun onCharacteristicRead(
-                device: BluetoothDevice,
-                characteristic: BluetoothGattCharacteristic,
-                requestId: Int,
-                value: ByteArray
-            ) {
-                sendReadResponse(device, characteristic, requestId)
-            }
-
-            // API 24-32 legacy path: request id is implicit (single outstanding read).
-            @Deprecated("Deprecated in Java")
-            override fun onCharacteristicRead(
+            // Single server-side read callback available on every API level (18+).
+            override fun onCharacteristicReadRequest(
                 device: BluetoothDevice?,
+                requestId: Int,
+                offset: Int,
                 characteristic: BluetoothGattCharacteristic?
             ) {
-                if (device != null && characteristic != null) {
-                    sendReadResponse(device, characteristic, LEGACY_REQUEST_ID)
+                val server = gattServer ?: return
+                if (device == null || characteristic == null) return
+
+                val fullPayload = when (characteristic.uuid?.toString()) {
+                    Constants.BLE_TOKEN_CHAR_UUID -> tokenProvider().toByteArray(Charsets.UTF_8)
+                    Constants.BLE_ID_CHAR_UUID -> {
+                        val bleMatch = Regex("\"ble\":\"([0-9a-fA-F]{12})\"").find(tokenProvider())
+                        (bleMatch?.groupValues?.get(1) ?: "").toByteArray(Charsets.UTF_8)
+                    }
+                    else -> ByteArray(0)
+                }
+
+                // Honour blob-read offsets for long characteristics.
+                val payload = if (offset in fullPayload.indices) {
+                    fullPayload.copyOfRange(offset, fullPayload.size)
+                } else {
+                    fullPayload
+                }
+
+                try {
+                    server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, payload)
+                } catch (e: Exception) {
+                    Log.e(tag, "Failed to send GATT read response", e)
                 }
             }
         }
@@ -109,35 +119,6 @@ class BleGattServer(
     }
 
     @SuppressLint("MissingPermission")
-    private fun sendReadResponse(
-        device: BluetoothDevice,
-        characteristic: BluetoothGattCharacteristic,
-        requestId: Int
-    ) {
-        val server = gattServer ?: return
-        val payload = when (characteristic.uuid?.toString()) {
-            Constants.BLE_TOKEN_CHAR_UUID -> tokenProvider().toByteArray(Charsets.UTF_8)
-            Constants.BLE_ID_CHAR_UUID -> {
-                val bleMatch = Regex("\"ble\":\"([0-9a-fA-F]{12})\"").find(tokenProvider())
-                (bleMatch?.groupValues?.get(1) ?: "").toByteArray(Charsets.UTF_8)
-            }
-            else -> ByteArray(0)
-        }
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, payload)
-            } else {
-                @Suppress("DEPRECATION")
-                characteristic.value = payload
-                @Suppress("DEPRECATION")
-                server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, payload)
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to send GATT read response", e)
-        }
-    }
-
-    @SuppressLint("MissingPermission")
     fun stop() {
         try {
             gattServer?.close()
@@ -146,9 +127,5 @@ class BleGattServer(
         }
         gattServer = null
         running = false
-    }
-
-    private companion object {
-        const val LEGACY_REQUEST_ID = 0
     }
 }
