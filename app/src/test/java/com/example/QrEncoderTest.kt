@@ -6,6 +6,7 @@ import com.example.photostand.core.DisplayDevice
 import com.example.photostand.p2p.pairing.QrEncoder
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.decoder.Decoder
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
@@ -30,14 +31,14 @@ class QrEncoderTest {
     private val zxingDecoder = Decoder()
 
     /** Decode a [QrEncoder.QrMatrix] (without quiet zone) using ZXing's internal QR decoder. */
-    private fun decode(matrix: QrEncoder.QrMatrix): String {
+    private fun decode(matrix: QrEncoder.QrMatrix): com.google.zxing.common.DecoderResult {
         val bits = BitMatrix(matrix.size, matrix.size)
         for (row in 0 until matrix.size) {
             for (col in 0 until matrix.size) {
                 if (matrix.isDark(row, col)) bits.set(col, row)
             }
         }
-        return zxingDecoder.decode(bits).text
+        return zxingDecoder.decode(bits)
     }
 
     @Test
@@ -59,16 +60,19 @@ class QrEncoderTest {
         // 44 chars x 5 = 220 bytes, inside the 230-byte version 9-L envelope.
         val content = "local-send style test 0123456789 abcdefghij ".repeat(5)
         val matrix = QrEncoder.encode(content)
-        assertEquals(content, decode(matrix))
+        assertEquals(content, decode(matrix).text)
     }
 
     @Test
     fun `encodes and decodes utf8`() {
         val content = "日本語 éèêë 🚀 QR テスト — pairing token".repeat(4)
         val matrix = QrEncoder.encode(content)
-        // ZXing's raw decoder returns byte-mode payload as ISO-8859-1; re-interpret UTF-8.
-        val reparsed = String(decode(matrix).toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8)
-        assertEquals(content, reparsed)
+        // Compare raw code bytes: ZXing's text conversion depends on the platform default
+        // charset, but byte-mode payload bytes must match our UTF-8 input exactly.
+        assertArrayEquals(
+            content.toByteArray(Charsets.UTF_8),
+            decode(matrix).rawBytes
+        )
     }
 
     @Test
@@ -104,7 +108,7 @@ class QrEncoderTest {
         val matrix = QrEncoder.encode(token)
         assertTrue("must fit version 9 (53 modules), was ${matrix.size}", matrix.size <= 53)
 
-        val reparsed = DisplayDevice.fromJson(decode(matrix))
+        val reparsed = DisplayDevice.fromJson(decode(matrix).text)
         assertNotNull(reparsed)
         assertEquals(token, reparsed?.toPairingToken())
     }
