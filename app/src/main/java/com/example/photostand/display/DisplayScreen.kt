@@ -95,6 +95,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
 import com.example.photostand.core.AnimationType
+import com.example.photostand.core.Constants
 import com.example.photostand.core.FitMode
 import com.example.photostand.p2p.pairing.QrCodeGenerator
 import kotlinx.coroutines.delay
@@ -128,17 +129,42 @@ fun DisplayScreen(
         }
     }
 
-    // Apply Screen Brightness Override
-    LaunchedEffect(uiState.effectiveBrightness) {
+    // Apply Screen Brightness Override. While AOD is active, force the ultra-low
+    // ambient brightness regardless of the normal auto-dim schedule.
+    LaunchedEffect(uiState.effectiveBrightness, uiState.aodActive) {
         val window = activity?.window
         if (window != null) {
             val layoutParams = window.attributes
-            layoutParams.screenBrightness = uiState.effectiveBrightness
+            layoutParams.screenBrightness =
+                if (uiState.aodActive) Constants.AOD_AMBIENT_BRIGHTNESS else uiState.effectiveBrightness
             window.attributes = layoutParams
         }
     }
 
     var showControls by remember { mutableStateOf(false) }
+    var lastInteractionMs by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    // New photo always counts as activity and wakes the display.
+    LaunchedEffect(uiState.newPhotoTrigger) {
+        if (uiState.newPhotoTrigger > 0L) {
+            lastInteractionMs = System.currentTimeMillis()
+            viewModel.setAodActive(false)
+        }
+    }
+
+    // Inactivity watchdog: enter AOD after the configured timeout.
+    LaunchedEffect(uiState.aodEnabled, uiState.aodTimeoutSeconds) {
+        while (true) {
+            delay(5_000L)
+            if (uiState.aodEnabled && !uiState.aodActive) {
+                val elapsed = System.currentTimeMillis() - lastInteractionMs
+                if (elapsed >= uiState.aodTimeoutSeconds * 1000L) {
+                    viewModel.setAodActive(true)
+                    showControls = false
+                }
+            }
+        }
+    }
 
     // Auto-hide controls after 5 seconds of inactivity
     LaunchedEffect(showControls) {
@@ -156,32 +182,52 @@ fun DisplayScreen(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                showControls = !showControls
+                lastInteractionMs = System.currentTimeMillis()
+                if (uiState.aodActive) {
+                    // First tap on AOD only wakes the display.
+                    viewModel.setAodActive(false)
+                    showControls = false
+                } else {
+                    showControls = !showControls
+                }
             }
             .testTag("display_screen_canvas")
     ) {
-        // Main Photo Canvas with selected Animation & Fit Mode
-        PhotoCanvas(
-            photoPath = uiState.currentPhotoPath,
-            fitMode = uiState.fitMode,
-            animationType = uiState.animationType,
-            trigger = uiState.newPhotoTrigger
-        )
-
-        // Clock & Status Overlay
-        if (uiState.showClock) {
-            DisplayClockOverlay(
+        if (uiState.aodActive) {
+            // Real Always-On Display: black AMOLED surface, shifted monochrome clock.
+            AodOverlay(
                 deviceName = uiState.deviceName,
                 isWifi = uiState.isWifiConnected,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(24.dp)
+                bluetoothOn = uiState.bluetoothEnabled,
+                batteryPercent = uiState.batteryPercent,
+                nightRed = uiState.aodNightRed,
+                isNight = viewModel.isNightTime(),
+                modifier = Modifier.fillMaxSize()
             )
+        } else {
+            // Main Photo Canvas with selected Animation & Fit Mode
+            PhotoCanvas(
+                photoPath = uiState.currentPhotoPath,
+                fitMode = uiState.fitMode,
+                animationType = uiState.animationType,
+                trigger = uiState.newPhotoTrigger
+            )
+
+            // Clock & Status Overlay
+            if (uiState.showClock) {
+                DisplayClockOverlay(
+                    deviceName = uiState.deviceName,
+                    isWifi = uiState.isWifiConnected,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(24.dp)
+                )
+            }
         }
 
-        // Minimalist On-Screen HUD Controls (revealed on tap)
+        // Minimalist On-Screen HUD Controls (revealed on tap, hidden during AOD)
         AnimatedVisibility(
-            visible = showControls,
+            visible = showControls && !uiState.aodActive,
             enter = fadeIn(tween(250)),
             exit = fadeOut(tween(300)),
             modifier = Modifier
@@ -248,6 +294,9 @@ fun DisplayScreen(
                 onFitModeChange = { viewModel.setFitMode(it) },
                 onAnimTypeChange = { viewModel.setAnimationType(it) },
                 onToggleClock = { viewModel.toggleShowClock() },
+                onAodToggle = { viewModel.setAodEnabled(it) },
+                onAodNightRedToggle = { viewModel.setAodNightRed(it) },
+                onAodTimeoutChange = { viewModel.setAodTimeoutSeconds(it) },
                 onShowQr = {
                     viewModel.toggleSettingsSheet()
                     viewModel.setShowPairingQr(true)
@@ -528,6 +577,9 @@ private fun DisplaySettingsContent(
     onFitModeChange: (FitMode) -> Unit,
     onAnimTypeChange: (AnimationType) -> Unit,
     onToggleClock: () -> Unit,
+    onAodToggle: (Boolean) -> Unit,
+    onAodNightRedToggle: (Boolean) -> Unit,
+    onAodTimeoutChange: (Int) -> Unit,
     onShowQr: () -> Unit,
     onSwitchMode: () -> Unit
 ) {
@@ -595,6 +647,83 @@ private fun DisplaySettingsContent(
                         modifier = Modifier.testTag("auto_dim_switch")
                     )
                 }
+            }
+        }
+
+        // Always-On Display
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.aod_title),
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = stringResource(R.string.aod_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = uiState.aodEnabled,
+                        onCheckedChange = onAodToggle,
+                        modifier = Modifier.testTag("aod_enabled_switch")
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.aod_night_red),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = stringResource(R.string.aod_night_red_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = uiState.aodNightRed,
+                        enabled = uiState.aodEnabled,
+                        onCheckedChange = onAodNightRedToggle,
+                        modifier = Modifier.testTag("aod_night_red_switch")
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = stringResource(R.string.aod_timeout, uiState.aodTimeoutSeconds),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Slider(
+                    value = uiState.aodTimeoutSeconds.toFloat(),
+                    onValueChange = { onAodTimeoutChange((it / 5f).toInt() * 5) },
+                    valueRange = 15f..300f,
+                    enabled = uiState.aodEnabled,
+                    modifier = Modifier.testTag("aod_timeout_slider")
+                )
+                Text(
+                    text = stringResource(R.string.aod_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
@@ -762,6 +891,10 @@ private fun DisplayPairingDialog(
                     ) {
                         Text(
                             text = "${stringResource(R.string.display_device_id)}: ${uiState.deviceId}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = "Bluetooth ID: ${uiState.bleId}",
                             style = MaterialTheme.typography.bodySmall
                         )
                         Text(
