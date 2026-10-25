@@ -320,12 +320,14 @@ object QrEncoder {
         var col = n - 1
         var upward = true
         while (col > 0) {
-            var currentCol = col
-            if (currentCol == 6) currentCol--
+            // Skip the timing-pattern column (6) by rewinding the loop variable itself:
+            // mutating a local copy would desync the column pairs (column 0 dropped,
+            // column 4 traversed twice) and corrupt the whole symbol.
+            if (col == 6) col--
             for (z in 0 until n) {
                 val row = if (upward) n - 1 - z else z
                 for (dc in 0..1) {
-                    val c = currentCol - dc
+                    val c = col - dc
                     if (!reserved[row][c] && bitIndex < bits.size) {
                         matrix.setDark(row, c, bits[bitIndex])
                         bitIndex++

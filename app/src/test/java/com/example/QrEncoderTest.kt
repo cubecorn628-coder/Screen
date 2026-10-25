@@ -56,7 +56,8 @@ class QrEncoderTest {
 
     @Test
     fun `encodes and decodes ascii`() {
-        val content = "local-send style test 0123456789 abcdefghij ".repeat(8)
+        // 44 chars x 5 = 220 bytes, inside the 230-byte version 9-L envelope.
+        val content = "local-send style test 0123456789 abcdefghij ".repeat(5)
         val matrix = QrEncoder.encode(content)
         assertEquals(content, decode(matrix))
     }
