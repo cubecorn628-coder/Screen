@@ -28,7 +28,7 @@ concurrency:
 jobs:
   build:
     name: Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
