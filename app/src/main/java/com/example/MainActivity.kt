@@ -104,6 +104,8 @@ fun PhotoStandApp(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissionsToRequest.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
         }
+        // Camera is used by the in-app QR scanner (also requested lazily inside the scanner).
+        permissionsToRequest.add(android.Manifest.permission.CAMERA)
         if (permissionsToRequest.isNotEmpty()) {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())
         }

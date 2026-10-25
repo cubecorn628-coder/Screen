@@ -24,6 +24,7 @@ enum class AnimationType {
 enum class ConnectionType {
     WIFI_MDNS,
     BLE_BEACON,
+    BLE_GATT,
     DIRECT_IP
 }
 // endregion
@@ -38,7 +39,11 @@ data class DisplayDevice(
     val isOnline: Boolean = false,
     val lastSeenTimestamp: Long = System.currentTimeMillis(),
     val connectionType: ConnectionType = ConnectionType.WIFI_MDNS,
-    val bleRssi: Int? = null
+    val bleRssi: Int? = null,
+    /** Stable 6-byte BLE identity (12 hex chars), advertised over Bluetooth. */
+    val bleId: String = "",
+    /** Trusted device: automatically re-connected whenever it is discovered. */
+    val autoConnect: Boolean = true
 ) {
     fun toJson(): String {
         val obj = JSONObject()
@@ -48,6 +53,27 @@ data class DisplayDevice(
         obj.put("port", port)
         obj.put("key", sharedKey)
         obj.put("ts", lastSeenTimestamp)
+        obj.put("ble", bleId)
+        obj.put("ct", connectionType.name)
+        obj.put("ac", autoConnect)
+        obj.put("v", Constants.PROTOCOL_VERSION)
+        return obj.toString()
+    }
+
+    /**
+     * Compact token embedded in QR codes and the BLE GATT characteristic. Omits fields
+     * that are irrelevant for pairing (timestamps, local connection state) so the payload
+     * stays well inside the QR byte-mode envelope and default ATT MTU limits.
+     */
+    fun toPairingToken(): String {
+        val obj = JSONObject()
+        obj.put("id", id)
+        obj.put("name", name)
+        obj.put("ip", ipAddress)
+        obj.put("port", port)
+        obj.put("key", sharedKey)
+        if (bleId.isNotBlank()) obj.put("ble", bleId)
+        obj.put("v", Constants.PROTOCOL_VERSION)
         return obj.toString()
     }
 
@@ -55,13 +81,21 @@ data class DisplayDevice(
         fun fromJson(jsonStr: String): DisplayDevice? {
             return try {
                 val obj = JSONObject(jsonStr)
+                val ct = try {
+                    ConnectionType.valueOf(obj.optString("ct", ConnectionType.WIFI_MDNS.name))
+                } catch (e: Exception) {
+                    ConnectionType.WIFI_MDNS
+                }
                 DisplayDevice(
                     id = obj.getString("id"),
                     name = obj.optString("name", "PhotoStand Display"),
                     ipAddress = obj.optString("ip", ""),
                     port = obj.optInt("port", Constants.DEFAULT_HTTP_PORT),
                     sharedKey = obj.optString("key", ""),
-                    lastSeenTimestamp = obj.optLong("ts", System.currentTimeMillis())
+                    lastSeenTimestamp = obj.optLong("ts", System.currentTimeMillis()),
+                    connectionType = ct,
+                    bleId = obj.optString("ble", ""),
+                    autoConnect = obj.optBoolean("ac", true)
                 )
             } catch (e: Exception) {
                 null

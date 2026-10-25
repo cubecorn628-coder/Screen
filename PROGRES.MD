@@ -83,16 +83,28 @@ Status: `[ ]` belum · `[~]` in progress · `[x]` done
 ## Phase 6 — Ide Fitur Masa Depan (UI/UX & AOD Advanced)
 
 ### A. Advanced Always-On Display (AOD) Mode
-- [ ] **Pixel Shift & Anti Burn-In Engine**
-  - Pergeseran piksel acak berperiode (misal: offset 2-5px setiap 60 detik) untuk seluruh elemen UI/jam guna mencegah *OLED image retention*.
-- [ ] **Ultra-Low Power AMOLED Ambient Profile**
-  - Renderer hemat daya ekstrem dengan background seram #000000 pekat (0% konsumsi daya piksel hitam pada layar AMOLED), kontras tinggi monokrom, dan pengurangan *refresh rate* ke 1Hz/30Hz jika didukung perangkat.
-- [ ] **Night-Vision Red Light Ambient**
-  - Mode kamar gelap otomatis (memanfaatkan sensor cahaya ambient): UI dan teks diubah menjadi spektrum merah redup (*red-monochrome*) agar nyaman untuk mata di malam hari dan tidak mengganggu tidur.
-- [ ] **Smart Contextual AOD Overlay & Widgets**
-  - Widget cuaca real-time minimalis, status baterai perangkat Display, persentase sinyal WiFi, serta kutipan/memo singkat yang dikirim langsung dari Controller.
+- [x] **Pixel Shift & Anti Burn-In Engine**
+  - Pergeseran piksel periodik (5 offset ±3px, bergeser tiap 60 detik dengan animasi halus) untuk seluruh klaster jam AOD guna mencegah *OLED image retention*.
+- [x] **Ultra-Low Power AMOLED Ambient Profile**
+  - `AodOverlay`: background #000000 pekat (0% konsumsi piksel hitam AMOLED), jam monokrom, brightness window dipaksa ke level ambient minimum selama AOD aktif.
+- [x] **Night-Vision Red Light Ambient**
+  - Palet merah redup otomatis pada jam AOD selama jendela malam 23:00–07:00 (dapat dimatikan dari Settings).
+- [x] **Smart Contextual AOD Overlay & Widgets**
+  - Jam, tanggal, nama perangkat, status WiFi/Bluetooth, dan persentase baterai di overlay AOD; timeout idle dapat diatur 15–300 detik; tap untuk wake, foto baru otomatis membangunkan layar.
 - [ ] **Proximity & Motion Wake-Up**
   - Memanfaatkan sensor jarak / akselerometer / mikrofon / BLE beacon presence dari Controller untuk meningkatkan kecerahan atau menampilkan animasi transisi foto penuh ketika pengguna mendekati perangkat Display.
+
+### A2. Perbaikan Koneksi, QR & BLE (sesuai audit LocalSend-style)
+- [x] **Bug fatal transfer diperbaiki**: server HTTP membaca header & body dari satu stream byte mentah (sebelumnya `BufferedReader` menelan byte body → "Incomplete payload" / gagal kirim gambar).
+- [x] **QR code sungguhan (ISO/IEC 18004)**: encoder QR murni Kotlin (Reed-Solomon GF(256), 8 mask + penalty scoring, BCH format/version, versi 1–9 L/M) menggantikan pola QR palsu; divalidasi bit-for-bit dengan implementasi referensi.
+- [x] **QR scanner kamera nyata**: CameraX + ZXing (`QrScannerScreen`), izin kamera runtime, torch, fallback entri manual.
+- [x] **BLE/Bluetooth fungsional**: BLE id 6-byte stabil (tidak terpotong), advert + scan-response berisi port, siklus scan 25/8 detik, GATT server (Display) & client (Controller) untuk tukar pairing token tanpa WiFi.
+- [x] **Auto-connection trusted device**: device ber-pairing otomatis di-handshake ulang dan di-refresh endpoint-nya via mDNS/BLE/GATT; status online dari ping WiFi atau sighting BLE.
+- [x] **Keandalan transfer**: retry 2×, `retryOnConnectionFailure`, timeout 60 detik, verifikasi HMAC, antrian resolve mDNS (perbaikan ERROR_MAX_LIMIT), multicast lock ref-count.
+- [x] **Token pairing universal**: satu payload JSON untuk QR dan BLE GATT, memuat IP/port, shared key, dan BLE id.
+- [x] **Bug fatal penempatan data QR diperbaiki**: traversal zig-zag salah saat melewati kolom timing 6 — kolom 0 tidak pernah diisi dan kolom 4 ditulis dua kali, sehingga seluruh simbol QR korup dan tidak mungkin di-scan. Diperbaiki dengan me-rewind variabel loop kolom; `QrEncoderTest` (Robolectric + decoder internal ZXing) membuktikan round-trip bit-sempurna untuk ASCII, UTF-8 (emoji/aksen), dan token pairing nyata.
+- [x] **Kompatibilitas API BLE di compileSdk 36**: GATT server memakai `onCharacteristicReadRequest` + `sendResponse` (bukan callback client), client memakai `readCharacteristic` satu-argumen dengan hasil di callback; karakteristik mendukung offset blob read.
+- [x] **CI hijau**: `assembleDebug` + seluruh unit test (termasuk `QrEncoderTest`) lulus di GitHub Actions — PR #2.
 
 ### B. Advanced UI/UX & Interactive Canvas
 - [ ] **Dynamic Color Scheme (Monet Extraction)**
