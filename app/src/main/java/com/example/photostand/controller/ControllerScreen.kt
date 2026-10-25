@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -125,6 +127,25 @@ fun ControllerScreen(
             }
             viewModel.dismissTransferResult()
         }
+    }
+
+    // Full-screen camera QR scanner (QR codes carry WiFi + BLE/GATT identity).
+    if (uiState.showQrScanner) {
+        QrScannerScreen(
+            onResult = { rawToken ->
+                val parsed = viewModel.pairFromToken(rawToken)
+                if (!parsed) {
+                    viewModel.setShowQrScanner(false)
+                    viewModel.reportPairingError(context.getString(R.string.pairing_invalid_token))
+                }
+            },
+            onBack = { viewModel.setShowQrScanner(false) },
+            onManualEntry = {
+                viewModel.setShowQrScanner(false)
+                viewModel.setShowPairingDialog(true)
+            }
+        )
+        return
     }
 
     Scaffold(
@@ -280,6 +301,10 @@ fun ControllerScreen(
             onPairDiscovered = { viewModel.pairDiscoveredDisplay(it) },
             onPairToken = { viewModel.pairFromToken(it) },
             onPairManual = { ip, port, name -> viewModel.pairManualIp(ip, port, name) },
+            onOpenScanner = {
+                viewModel.setShowPairingDialog(false)
+                viewModel.setShowQrScanner(true)
+            },
             onDismiss = { viewModel.setShowPairingDialog(false) }
         )
     }
@@ -361,6 +386,7 @@ private fun DisplayDeviceCard(
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
+                        TransportBadge(display)
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -434,6 +460,40 @@ private fun DisplayDeviceCard(
 }
 // endregion
 
+// region Transport Badge
+@Composable
+private fun TransportBadge(display: DisplayDevice) {
+    val isBle = display.connectionType == ConnectionType.BLE_BEACON ||
+        display.connectionType == ConnectionType.BLE_GATT
+    val container = if (isBle) Color(0xFF2563EB) else Color(0xFF0F766E)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(container.copy(alpha = 0.15f))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Icon(
+            imageVector = if (isBle) Icons.Default.Bluetooth else Icons.Default.Wifi,
+            contentDescription = null,
+            tint = container,
+            modifier = Modifier.size(12.dp)
+        )
+        Text(
+            text = when (display.connectionType) {
+                ConnectionType.BLE_GATT -> "Bluetooth GATT"
+                ConnectionType.BLE_BEACON -> "BLE ${display.bleRssi?.let { "($it dBm)" } ?: ""}".trim()
+                ConnectionType.DIRECT_IP -> "Direct IP"
+                ConnectionType.WIFI_MDNS -> "WiFi mDNS"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = container
+        )
+    }
+}
+// endregion
+
 // region Empty State
 @Composable
 private fun EmptyDisplaysView(
@@ -493,6 +553,7 @@ private fun PairingModalDialog(
     onPairDiscovered: (DisplayDevice) -> Unit,
     onPairToken: (String) -> Boolean,
     onPairManual: (ip: String, port: Int, name: String) -> Unit,
+    onOpenScanner: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -530,7 +591,7 @@ private fun PairingModalDialog(
                 }
 
                 if (selectedTab == 0) {
-                    // Discovered Tab
+                    // Discovered Tab — merged mDNS WiFi + BLE beacon + BLE GATT results
                     if (discoveredDisplays.isEmpty()) {
                         Column(
                             modifier = Modifier
@@ -566,8 +627,11 @@ private fun PairingModalDialog(
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Bold
                                             )
+                                            TransportBadge(disp)
                                             Text(
-                                                text = "${disp.ipAddress}:${disp.port}",
+                                                text = if (disp.ipAddress.isNotBlank())
+                                                    "${disp.ipAddress}:${disp.port}"
+                                                else "Waiting for Bluetooth token…",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -584,8 +648,19 @@ private fun PairingModalDialog(
                         }
                     }
                 } else {
-                    // Manual / Token Tab
+                    // Camera QR scan + manual / token tab
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = onOpenScanner,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("open_qr_scanner_button")
+                        ) {
+                            Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(stringResource(R.string.scanner_open))
+                        }
+
                         OutlinedTextField(
                             value = tokenInput,
                             onValueChange = { tokenInput = it },
