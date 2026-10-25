@@ -28,7 +28,9 @@ concurrency:
 jobs:
   build:
     name: Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -130,8 +132,33 @@ jobs:
           PYEOF
 
       - name: Build Debug APK & Run Tests
+        id: build
+        continue-on-error: true
         run: |
-          ./gradlew assembleDebug testDebugUnitTest --stacktrace
+          ./gradlew assembleDebug testDebugUnitTest --stacktrace 2>&1 | tee build-output.log
+          # Preserve the real Gradle exit code through the tee pipe.
+          exit ${PIPESTATUS[0]}
+
+      - name: Publish build errors to job summary
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "## Build failure" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E "^e: |error:|FAILURE:|What went wrong|Caused by|ApplicationManager|Cannot invoke" build-output.log | head -80 >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          # Also commit the filtered log so it is readable through the GitHub API.
+          mkdir -p ci-logs
+          {
+            grep -E "^e: |error:|FAILURE:|What went wrong|Caused by|ApplicationManager|Cannot invoke|> Task|FAILED|AssertionError|expected:|but was:|Tests? " build-output.log | head -300 || true
+            echo "===== JUnit XML failures ====="
+            grep -E "<failure|<error" -A 8 app/build/test-results/testDebugUnitTest/*.xml 2>/dev/null || true
+          } > ci-logs/build-errors.log
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add ci-logs/build-errors.log
+          git commit -m "ci: simpan log error build [skip ci]" || true
+          git push origin HEAD:${{ github.head_ref || github.ref_name }} || true
+          exit 1
 
       - name: Upload Test Reports
         if: always()

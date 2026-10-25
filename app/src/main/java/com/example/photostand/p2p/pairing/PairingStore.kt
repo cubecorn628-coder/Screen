@@ -20,6 +20,8 @@ class PairingStore(context: Context) {
     private val _pairedDisplays = MutableStateFlow<List<DisplayDevice>>(loadPairedDisplays())
     val pairedDisplays: StateFlow<List<DisplayDevice>> = _pairedDisplays.asStateFlow()
 
+    fun pairedDisplaysSnapshot(): List<DisplayDevice> = _pairedDisplays.value
+
     private val _pairedControllers = MutableStateFlow<List<PairedController>>(loadPairedControllers())
     val pairedControllers: StateFlow<List<PairedController>> = _pairedControllers.asStateFlow()
 
@@ -48,6 +50,19 @@ class PairingStore(context: Context) {
             prefs.edit().putString(Constants.KEY_DEVICE_SECRET, secret).apply()
         }
         return secret
+    }
+
+    /**
+     * Stable 6-byte BLE identity (12 hex chars). Survives app restarts so trusted
+     * controllers can recognise this display purely from its Bluetooth advertisement.
+     */
+    fun getOrCreateBleId(): String {
+        var bleId = prefs.getString(Constants.KEY_BLE_ID, null)
+        if (bleId.isNullOrEmpty()) {
+            bleId = PairingCrypto.generateDeviceId()
+            prefs.edit().putString(Constants.KEY_BLE_ID, bleId).apply()
+        }
+        return bleId
     }
     // endregion
 
@@ -119,6 +134,13 @@ class PairingStore(context: Context) {
         }
     }
 
+    /** Trusted display lookup by its stable BLE identity (used by BLE auto-connect). */
+    fun findPairedDisplayByBleId(bleId: String): DisplayDevice? =
+        _pairedDisplays.value.find { it.bleId.isNotBlank() && it.bleId.equals(bleId, ignoreCase = true) }
+
+    fun isTrustedDisplay(deviceId: String): Boolean =
+        _pairedDisplays.value.any { it.id == deviceId && it.autoConnect }
+
     private fun loadPairedDisplays(): List<DisplayDevice> {
         val raw = prefs.getString(Constants.KEY_PAIRED_DISPLAYS, "[]") ?: "[]"
         val list = mutableListOf<DisplayDevice>()
@@ -161,6 +183,8 @@ class PairingStore(context: Context) {
         if (_pairedControllers.value.isEmpty()) return true
         return _pairedControllers.value.any { it.controllerId == controllerId }
     }
+
+    fun pairedControllersSnapshot(): List<PairedController> = _pairedControllers.value
 
     fun getControllerKey(controllerId: String): String? {
         val found = _pairedControllers.value.find { it.controllerId == controllerId }
@@ -213,5 +237,17 @@ class PairingStore(context: Context) {
 
     fun isShowClock(): Boolean = prefs.getBoolean(Constants.KEY_SHOW_CLOCK, true)
     fun setShowClock(show: Boolean) = prefs.edit().putBoolean(Constants.KEY_SHOW_CLOCK, show).apply()
+
+    // region Always-On Display (AOD)
+    fun isAodEnabled(): Boolean = prefs.getBoolean(Constants.KEY_AOD_ENABLED, true)
+    fun setAodEnabled(enabled: Boolean) = prefs.edit().putBoolean(Constants.KEY_AOD_ENABLED, enabled).apply()
+
+    fun isAodNightRedEnabled(): Boolean = prefs.getBoolean(Constants.KEY_AOD_NIGHT_RED, true)
+    fun setAodNightRedEnabled(enabled: Boolean) = prefs.edit().putBoolean(Constants.KEY_AOD_NIGHT_RED, enabled).apply()
+
+    fun getAodTimeoutSeconds(): Int =
+        prefs.getInt(Constants.KEY_AOD_TIMEOUT_SECONDS, Constants.AOD_DEFAULT_TIMEOUT_SECONDS)
+    fun setAodTimeoutSeconds(seconds: Int) =
+        prefs.edit().putInt(Constants.KEY_AOD_TIMEOUT_SECONDS, seconds).apply()
     // endregion
 }
