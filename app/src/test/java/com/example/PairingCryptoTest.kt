@@ -40,6 +40,18 @@ class PairingCryptoTest {
         val signature = PairingCrypto.calculateHmac(message, key)
         assertTrue(signature.isNotBlank())
         assertTrue(PairingCrypto.verifyHmac(message, signature, key))
+        assertTrue(!PairingCrypto.verifyHmac("$message:changed", signature, key))
+        assertTrue(!PairingCrypto.verifyHmac(message, signature, PairingCrypto.generateRandomKey()))
+    }
+
+    @Test
+    fun testNonceIsRandomAndHasExpectedWireFormat() {
+        val first = PairingCrypto.generateNonce()
+        val second = PairingCrypto.generateNonce()
+
+        assertTrue(first.matches(Regex("[0-9a-f]{32}")))
+        assertTrue(second.matches(Regex("[0-9a-f]{32}")))
+        assertTrue(first != second)
     }
 
     @Test

@@ -16,6 +16,9 @@ import org.json.JSONArray
 
 class PairingStore(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+    private val controllerLock = Any()
+    private val replayLock = Any()
+    private val replayNoncePattern = Regex("[0-9a-f]{32}")
 
     private val _pairedDisplays = MutableStateFlow<List<DisplayDevice>>(loadPairedDisplays())
     val pairedDisplays: StateFlow<List<DisplayDevice>> = _pairedDisplays.asStateFlow()
@@ -167,28 +170,74 @@ class PairingStore(context: Context) {
     // endregion
 
     // region Paired Controllers (Display Side)
-    fun addOrUpdateController(controller: PairedController) {
-        val current = _pairedControllers.value.toMutableList()
-        val index = current.indexOfFirst { it.controllerId == controller.controllerId }
-        if (index >= 0) {
-            current[index] = controller
-        } else {
-            current.add(controller)
+    /** Enrolls only a new controller proving the device secret, or refreshes an existing one
+     * proving its already stored key. Existing keys are never replaced by this operation.
+     */
+    fun registerAuthenticatedController(controllerId: String, label: String, provenKey: String): Boolean =
+        synchronized(controllerLock) {
+            if (controllerId.isBlank() || provenKey.isBlank()) return@synchronized false
+            val current = _pairedControllers.value.toMutableList()
+            val index = current.indexOfFirst { it.controllerId == controllerId }
+            if (index >= 0) {
+                val existing = current[index]
+                if (!PairingCrypto.constantTimeEquals(existing.sharedKey, provenKey)) return@synchronized false
+                current[index] = existing.copy(label = label.ifBlank { existing.label })
+            } else {
+                val deviceSecret = getOrCreateDeviceSecret()
+                if (!PairingCrypto.constantTimeEquals(deviceSecret, provenKey)) return@synchronized false
+                current.add(PairedController(controllerId, label, deviceSecret))
+            }
+            saveControllers(current)
         }
-        saveControllers(current)
+
+    fun isControllerAuthorized(controllerId: String): Boolean = synchronized(controllerLock) {
+        controllerId.isNotBlank() && _pairedControllers.value.any { it.controllerId == controllerId }
     }
 
-    fun isControllerAuthorized(controllerId: String): Boolean {
-        // If no controller is paired yet, accept initial pairing
-        if (_pairedControllers.value.isEmpty()) return true
-        return _pairedControllers.value.any { it.controllerId == controllerId }
+    fun pairedControllersSnapshot(): List<PairedController> = synchronized(controllerLock) {
+        _pairedControllers.value.toList()
     }
 
-    fun pairedControllersSnapshot(): List<PairedController> = _pairedControllers.value
-
-    fun getControllerKey(controllerId: String): String? {
+    fun getControllerKey(controllerId: String): String? = synchronized(controllerLock) {
         val found = _pairedControllers.value.find { it.controllerId == controllerId }
-        return found?.sharedKey ?: getOrCreateDeviceSecret()
+        found?.sharedKey
+    }
+
+    /** Atomically consumes and durably records a nonce before transfer side effects occur. */
+    fun consumeTransferNonce(controllerId: String, nonce: String, nowMs: Long, maxAgeMs: Long): Boolean =
+        synchronized(replayLock) {
+            if (controllerId.isBlank() || !replayNoncePattern.matches(nonce) || maxAgeMs <= 0L) {
+                return@synchronized false
+            }
+
+            val raw = prefs.getString(Constants.KEY_TRANSFER_REPLAY_STATE, "[]") ?: "[]"
+            val retained = JSONArray()
+            val cutoff = nowMs - (maxAgeMs * 2L)
+            try {
+                val stored = JSONArray(raw)
+                for (index in 0 until stored.length()) {
+                    val entry = stored.getJSONObject(index)
+                    val seenAt = entry.optLong("seenAt", Long.MIN_VALUE)
+                    if (seenAt >= cutoff) {
+                        if (entry.optString("controllerId") == controllerId && entry.optString("nonce") == nonce) {
+                            return@synchronized false
+                        }
+                        retained.put(entry)
+                    }
+                }
+            } catch (e: Exception) {
+                // Corrupt replay state fails closed instead of silently reopening old requests.
+                return@synchronized false
+            }
+
+            if (retained.length() >= Constants.MAX_RECORDED_TRANSFER_NONCES) return@synchronized false
+            retained.put(org.json.JSONObject().apply {
+                put("controllerId", controllerId)
+                put("nonce", nonce)
+                put("seenAt", nowMs)
+            })
+            prefs.edit().putString(Constants.KEY_TRANSFER_REPLAY_STATE, retained.toString()).commit()
+        }
     }
 
     private fun loadPairedControllers(): List<PairedController> {
@@ -206,13 +255,14 @@ class PairingStore(context: Context) {
         return list
     }
 
-    private fun saveControllers(list: List<PairedController>) {
-        _pairedControllers.value = list
+    private fun saveControllers(list: List<PairedController>): Boolean {
         val arr = JSONArray()
         for (item in list) {
             arr.put(item.toJson())
         }
-        prefs.edit().putString(Constants.KEY_PAIRED_CONTROLLERS, arr.toString()).apply()
+        if (!prefs.edit().putString(Constants.KEY_PAIRED_CONTROLLERS, arr.toString()).commit()) return false
+        _pairedControllers.value = list
+        return true
     }
     // endregion
 

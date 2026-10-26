@@ -102,7 +102,7 @@ class DisplayViewModel(application: Application) : AndroidViewModel(application)
         onPhotoReceived = { path -> onNewPhotoReceived(path) }
     )
 
-    // Serves the exact pairing token rendered as the on-screen QR code.
+    // GATT server filters the QR token down to public discovery metadata; it never exposes its key.
     private val gattServer = BleGattServer(application) { _uiState.value.pairingToken }
 
     init {

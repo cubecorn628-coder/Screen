@@ -2,6 +2,7 @@
 package com.example.photostand.p2p.pairing
 
 import android.util.Base64
+import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -32,6 +33,27 @@ object PairingCrypto {
         }
         return sb.toString()
     }
+
+    fun generateNonce(): String {
+        val bytes = ByteArray(16)
+        secureRandom.nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    fun pairingProofMessage(displayId: String, controllerId: String, challenge: String, label: String): String =
+        "photostand-pair-v3|${displayId.length}:$displayId|${controllerId.length}:$controllerId|${challenge.length}:$challenge|${label.length}:$label"
+
+    fun pairingResponseMessage(
+        displayId: String,
+        controllerId: String,
+        challenge: String,
+        displayName: String,
+        bleId: String
+    ): String =
+        "photostand-pair-response-v3|paired|${displayId.length}:$displayId|${controllerId.length}:$controllerId|${challenge.length}:$challenge|${displayName.length}:$displayName|${bleId.length}:$bleId"
+
+    fun transferSignatureMessage(senderDeviceId: String, timestamp: Long, nonce: String, contentLength: Int): String =
+        "photostand-transfer-v3|${senderDeviceId.length}:$senderDeviceId|$timestamp|$nonce|$contentLength"
     // endregion
 
     // region AES-GCM Encryption / Decryption
@@ -94,7 +116,10 @@ object PairingCrypto {
 
     fun verifyHmac(message: String, signature: String, base64Key: String): Boolean {
         val calculated = calculateHmac(message, base64Key)
-        return calculated == signature
+        return MessageDigest.isEqual(
+            calculated.toByteArray(Charsets.US_ASCII),
+            signature.toByteArray(Charsets.US_ASCII)
+        )
     }
     // endregion
 

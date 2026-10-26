@@ -60,11 +60,7 @@ data class DisplayDevice(
         return obj.toString()
     }
 
-    /**
-     * Compact token embedded in QR codes and the BLE GATT characteristic. Omits fields
-     * that are irrelevant for pairing (timestamps, local connection state) so the payload
-     * stays well inside the QR byte-mode envelope and default ATT MTU limits.
-     */
+    /** Compact bearer token for deliberate out-of-band pairing via QR/manual entry. */
     fun toPairingToken(): String {
         val obj = JSONObject()
         obj.put("id", id)

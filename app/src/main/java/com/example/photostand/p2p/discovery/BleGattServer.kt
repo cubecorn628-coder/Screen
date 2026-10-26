@@ -12,15 +12,14 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.util.Log
 import com.example.photostand.core.Constants
+import org.json.JSONObject
 import java.util.UUID
 
 /**
  * Display-side BLE GATT server.
  *
- * Exposes the full pairing token (device id, name, IP, port, shared key, BLE id) over a
- * readable characteristic so a Controller can pair through Bluetooth even when the two
- * devices are not on the same WiFi network yet. The token is the same JSON printed as the
- * on-screen QR code, so QR and BLE pairing are fully interchangeable.
+ * Exposes public discovery metadata over GATT. The bearer pairing key is deliberately
+ * excluded; actual pairing requires the QR/manual token and its authenticated challenge.
  */
 class BleGattServer(
     private val context: Context,
@@ -50,7 +49,7 @@ class BleGattServer(
             BluetoothGattService.SERVICE_TYPE_PRIMARY
         )
 
-        // Pairing token — full JSON, read only.
+                // Public display metadata only; the pairing key is never returned over BLE.
         val tokenCharacteristic = BluetoothGattCharacteristic(
             UUID.fromString(Constants.BLE_TOKEN_CHAR_UUID),
             BluetoothGattCharacteristic.PROPERTY_READ,
@@ -82,11 +81,23 @@ class BleGattServer(
                 val server = gattServer ?: return
                 if (device == null || characteristic == null) return
 
+                val publicInfo = try {
+                    val token = JSONObject(tokenProvider())
+                    JSONObject().apply {
+                        put("id", token.optString("id"))
+                        put("name", token.optString("name"))
+                        put("ip", token.optString("ip"))
+                        put("port", token.optInt("port", Constants.DEFAULT_HTTP_PORT))
+                        put("ble", token.optString("ble"))
+                        put("v", token.optInt("v", Constants.PROTOCOL_VERSION))
+                    }.toString()
+                } catch (e: Exception) {
+                    "{}"
+                }
                 val fullPayload = when (characteristic.uuid?.toString()) {
-                    Constants.BLE_TOKEN_CHAR_UUID -> tokenProvider().toByteArray(Charsets.UTF_8)
+                    Constants.BLE_TOKEN_CHAR_UUID -> publicInfo.toByteArray(Charsets.UTF_8)
                     Constants.BLE_ID_CHAR_UUID -> {
-                        val bleMatch = Regex("\"ble\":\"([0-9a-fA-F]{12})\"").find(tokenProvider())
-                        (bleMatch?.groupValues?.get(1) ?: "").toByteArray(Charsets.UTF_8)
+                        JSONObject(publicInfo).optString("ble", "").toByteArray(Charsets.UTF_8)
                     }
                     else -> ByteArray(0)
                 }

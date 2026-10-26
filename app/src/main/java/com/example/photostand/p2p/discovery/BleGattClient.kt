@@ -27,9 +27,8 @@ import java.util.concurrent.ConcurrentHashMap
  * Controller-side BLE GATT client.
  *
  * Consumes [BleSight]s from [BlePresence], connects to each nearby display one at a time,
- * negotiates a large ATT MTU and reads the full pairing token characteristic. Successfully
- * read tokens are emitted as [DisplayDevice]s — the exact same payload the display renders
- * as a QR code — enabling fully automatic trusted pairing over Bluetooth.
+ * negotiates a large ATT MTU and reads public display metadata. The GATT result is for
+ * discovery only; it contains no pairing secret and cannot authorize photo transfers.
  *
  * A per-device cooldown prevents reconnect loops; the whole flow is best-effort and never
  * blocks WiFi/mDNS discovery.
@@ -209,7 +208,7 @@ class BleGattClient(
         val index = current.indexOfFirst { it.id == enriched.id }
         if (index >= 0) current[index] = enriched else current.add(enriched)
         _pairingTokens.value = current
-        Log.d(tag, "Pairing token received over GATT for ${enriched.name}")
+        Log.d(tag, "Public discovery metadata received over GATT for ${enriched.name}")
         finishWithCooldown(sight.bleId, Constants.BLE_GATT_RETRY_COOLDOWN_MS)
     }
 

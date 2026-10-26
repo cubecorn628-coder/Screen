@@ -4,7 +4,6 @@ package com.example.photostand.p2p.transfer
 import android.content.Context
 import android.util.Log
 import com.example.photostand.core.Constants
-import com.example.photostand.core.PairedController
 import com.example.photostand.core.db.SharedPhotoEntity
 import com.example.photostand.core.db.SharedPhotoRepository
 import com.example.photostand.p2p.pairing.PairingCrypto
@@ -43,6 +42,9 @@ class DisplayReceiveServer(
     private val tag = "DisplayReceiveServer"
     private var serverSocket: ServerSocket? = null
     private var serverJob: Job? = null
+    private data class PairingChallenge(val controllerId: String, val expiresAtMs: Long)
+    private val pairingChallengeLock = Any()
+    private val pairingChallenges = HashMap<String, PairingChallenge>()
 
     val isRunning: Boolean
         get() = serverSocket != null && !(serverSocket?.isClosed ?: true)
@@ -121,40 +123,108 @@ class DisplayReceiveServer(
                     sendHttpResponse(output, 200, "OK", "application/json", body.toByteArray(Charsets.UTF_8))
                 }
 
-                method.equals("POST", ignoreCase = true) && path == "/api/v1/handshake" -> {
-                    if (contentLength <= 0 || contentLength > 64 * 1024) {
+                method.equals("POST", ignoreCase = true) && path == "/api/v1/pairing-challenge" -> {
+                    if (contentLength <= 0 || contentLength > 16 * 1024) {
                         sendHttpResponse(output, 400, "Bad Request", "application/json",
                             """{"error":"Invalid content length"}""".toByteArray())
                         return
                     }
                     val bodyBytes = readExact(input, contentLength)
-                    val bodyJson = try {
+                    if (bodyBytes.size != contentLength) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Incomplete payload"}""".toByteArray())
+                        return
+                    }
+                    val requestJson = try {
                         JSONObject(String(bodyBytes, Charsets.UTF_8))
                     } catch (e: Exception) {
-                        JSONObject()
+                        null
                     }
-
-                    val controllerId = bodyJson.optString("controllerId", "")
-                    val label = bodyJson.optString("label", "Controller")
-                    // Blank key means "use the display's own secret" — optString would otherwise
-                    // happily store an empty string and break every later encrypted transfer.
-                    val sharedKey = bodyJson.optString("key", "")
-                        .ifBlank { pairingStore.getOrCreateDeviceSecret() }
-
-                    if (controllerId.isBlank()) {
+                    if (requestJson == null || requestJson.optInt("v", -1) != Constants.PROTOCOL_VERSION) {
                         sendHttpResponse(output, 400, "Bad Request", "application/json",
-                            """{"error":"Missing controllerId"}""".toByteArray())
+                            """{"error":"Invalid pairing request"}""".toByteArray())
+                        return
+                    }
+                    val controllerId = requestJson.optString("controllerId", "")
+                    if (controllerId.isBlank() || controllerId.length > 128 || controllerId != controllerId.trim()) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Invalid controllerId"}""".toByteArray())
+                        return
+                    }
+                    val challenge = issuePairingChallenge(controllerId)
+                    if (challenge == null) {
+                        sendHttpResponse(output, 503, "Service Unavailable", "application/json",
+                            """{"error":"Pairing challenge capacity reached"}""".toByteArray())
+                        return
+                    }
+                    val body = JSONObject().apply {
+                        put("challenge", challenge)
+                        put("displayId", pairingStore.getOrCreateDeviceId())
+                        put("expiresInMs", Constants.PAIRING_CHALLENGE_TTL_MS)
+                        put("v", Constants.PROTOCOL_VERSION)
+                    }.toString()
+                    sendHttpResponse(output, 200, "OK", "application/json", body.toByteArray(Charsets.UTF_8))
+                }
+
+                method.equals("POST", ignoreCase = true) && path == "/api/v1/handshake" -> {
+                    if (contentLength <= 0 || contentLength > 16 * 1024) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Invalid content length"}""".toByteArray())
+                        return
+                    }
+                    val bodyBytes = readExact(input, contentLength)
+                    if (bodyBytes.size != contentLength) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Incomplete payload"}""".toByteArray())
+                        return
+                    }
+                    val bodyJson = try { JSONObject(String(bodyBytes, Charsets.UTF_8)) } catch (e: Exception) { null }
+                    if (bodyJson == null || bodyJson.optInt("v", -1) != Constants.PROTOCOL_VERSION) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Invalid handshake request"}""".toByteArray())
                         return
                     }
 
-                    pairingStore.addOrUpdateController(PairedController(controllerId, label, sharedKey))
+                    val controllerId = bodyJson.optString("controllerId", "")
+                    val label = bodyJson.optString("label", "Controller").take(64)
+                        .replace('\n', ' ').replace('\r', ' ')
+                    val challenge = bodyJson.optString("challenge", "")
+                    val proof = bodyJson.optString("proof", "")
+                    if (controllerId.isBlank() || controllerId.length > 128 || controllerId != controllerId.trim() ||
+                        !challenge.matches(Regex("[0-9a-f]{32}")) || proof.isBlank()
+                    ) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Invalid handshake fields"}""".toByteArray())
+                        return
+                    }
+
+                    val proofKey = pairingStore.getControllerKey(controllerId)
+                        ?: pairingStore.getOrCreateDeviceSecret()
+                    val proofMessage = PairingCrypto.pairingProofMessage(
+                        pairingStore.getOrCreateDeviceId(), controllerId, challenge, label
+                    )
+                    if (!consumePairingChallenge(challenge, controllerId) ||
+                        !PairingCrypto.verifyHmac(proofMessage, proof, proofKey) ||
+                        !pairingStore.registerAuthenticatedController(controllerId, label, proofKey)
+                    ) {
+                        sendHttpResponse(output, 401, "Unauthorized", "application/json",
+                            """{"error":"Pairing proof rejected"}""".toByteArray())
+                        return
+                    }
+                    val displayId = pairingStore.getOrCreateDeviceId()
+                    val displayName = pairingStore.getDeviceName()
+                    val bleId = pairingStore.getOrCreateBleId()
+                    val responseProof = PairingCrypto.calculateHmac(
+                        PairingCrypto.pairingResponseMessage(displayId, controllerId, challenge, displayName, bleId),
+                        proofKey
+                    )
                     val resp = JSONObject().apply {
                         put("status", "paired")
-                        put("displayId", pairingStore.getOrCreateDeviceId())
-                        put("displayName", pairingStore.getDeviceName())
-                        // Echo the negotiated key so the controller persists the exact secret.
-                        put("key", sharedKey)
-                        put("ble", pairingStore.getOrCreateBleId())
+                        put("displayId", displayId)
+                        put("displayName", displayName)
+                        put("ble", bleId)
+                        put("proof", responseProof)
+                        put("v", Constants.PROTOCOL_VERSION)
                     }.toString()
                     sendHttpResponse(output, 200, "OK", "application/json", resp.toByteArray(Charsets.UTF_8))
                 }
@@ -162,11 +232,19 @@ class DisplayReceiveServer(
                 method.equals("POST", ignoreCase = true) && path == "/api/v1/transfer" -> {
                     val senderDeviceId = headers["x-sender-device-id"] ?: ""
                     val signature = headers["x-signature"] ?: ""
-                    val timestamp = headers["x-timestamp"] ?: ""
+                    val timestamp = headers["x-timestamp"]?.toLongOrNull()
+                    val nonce = headers["x-nonce"] ?: ""
+                    val protocolVersion = headers["x-protocol-version"]
 
                     if (contentLength <= 0 || contentLength > Constants.MAX_IMAGE_BYTES) {
                         sendHttpResponse(output, 400, "Bad Request", "application/json",
                             """{"error":"Invalid content length"}""".toByteArray())
+                        return
+                    }
+
+                    if (protocolVersion != Constants.PROTOCOL_VERSION.toString()) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Unsupported protocol version"}""".toByteArray())
                         return
                     }
 
@@ -177,7 +255,35 @@ class DisplayReceiveServer(
                         return
                     }
 
-                    // Read the exact binary payload straight from the shared stream.
+                    val now = System.currentTimeMillis()
+                    if (timestamp == null || timestamp < now - Constants.AUTH_CLOCK_SKEW_MS ||
+                        timestamp > now + Constants.AUTH_CLOCK_SKEW_MS || !nonce.matches(Regex("[0-9a-f]{32}"))
+                    ) {
+                        sendHttpResponse(output, 401, "Unauthorized", "application/json",
+                            """{"error":"Invalid or stale transfer authentication"}""".toByteArray())
+                        return
+                    }
+
+                    val sharedKey = pairingStore.getControllerKey(senderDeviceId)
+                    if (sharedKey == null || !PairingCrypto.verifyHmac(
+                            PairingCrypto.transferSignatureMessage(senderDeviceId, timestamp, nonce, contentLength),
+                            signature,
+                            sharedKey
+                        )
+                    ) {
+                        Log.w(tag, "HMAC verification failed for $senderDeviceId")
+                        sendHttpResponse(output, 401, "Unauthorized", "application/json",
+                            """{"error":"Bad signature"}""".toByteArray())
+                        return
+                    }
+
+                    if (!pairingStore.consumeTransferNonce(senderDeviceId, nonce, now, Constants.AUTH_CLOCK_SKEW_MS)) {
+                        sendHttpResponse(output, 409, "Conflict", "application/json",
+                            """{"error":"Transfer replay rejected"}""".toByteArray())
+                        return
+                    }
+
+                    // Read the exact binary payload straight from the shared stream only after auth.
                     val payloadBytes = readExact(input, contentLength)
                     if (payloadBytes.size != contentLength) {
                         sendHttpResponse(output, 400, "Bad Request", "application/json",
@@ -185,39 +291,28 @@ class DisplayReceiveServer(
                         return
                     }
 
-                    val sharedKey = pairingStore.getControllerKey(senderDeviceId)
-                        ?: pairingStore.getOrCreateDeviceSecret()
-
-                    // Verify HMAC when the sender provided one.
-                    if (signature.isNotBlank() && timestamp.isNotBlank()) {
-                        val expected = PairingCrypto.calculateHmac(
-                            "$senderDeviceId:$timestamp:${payloadBytes.size}", sharedKey
-                        )
-                        if (!constantTimeEquals(expected, signature)) {
-                            Log.w(tag, "HMAC verification failed for $senderDeviceId")
-                            sendHttpResponse(output, 401, "Unauthorized", "application/json",
-                                """{"error":"Bad signature"}""".toByteArray())
-                            return
-                        }
-                    }
-
                     val decryptedBytes = try {
                         PairingCrypto.decrypt(payloadBytes, sharedKey)
                     } catch (e: Exception) {
-                        // Backwards compatibility: accept a plain image only when no controller
-                        // has ever been paired (first-run open pairing).
-                        if (pairingStore.pairedControllersSnapshot().isEmpty() && isImageBytes(payloadBytes)) {
-                            payloadBytes
-                        } else {
-                            Log.e(tag, "Decryption failed", e)
-                            sendHttpResponse(output, 400, "Bad Request", "application/json",
-                                """{"error":"Decryption error"}""".toByteArray())
-                            return
-                        }
+                        Log.e(tag, "Decryption failed", e)
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Decryption error"}""".toByteArray())
+                        return
+                    }
+                    val mimeType = imageMimeType(decryptedBytes)
+                    if (mimeType == null) {
+                        sendHttpResponse(output, 400, "Bad Request", "application/json",
+                            """{"error":"Unsupported image payload"}""".toByteArray())
+                        return
                     }
 
                     val photoDir = File(context.filesDir, "photos").apply { mkdirs() }
-                    val photoFile = File(photoDir, "latest_photo_${System.currentTimeMillis()}.jpg")
+                    val extension = when (mimeType) {
+                        "image/png" -> "png"
+                        "image/webp" -> "webp"
+                        else -> "jpg"
+                    }
+                    val photoFile = File(photoDir, "latest_photo_${System.currentTimeMillis()}.$extension")
                     FileOutputStream(photoFile).use { fos ->
                         fos.write(decryptedBytes)
                         fos.flush()
@@ -229,7 +324,7 @@ class DisplayReceiveServer(
                         senderDeviceName = pairingStore.getDeviceName(),
                         timestamp = System.currentTimeMillis(),
                         fileSizeBytes = decryptedBytes.size.toLong(),
-                        mimeType = "image/jpeg"
+                        mimeType = mimeType
                     )
                     // This socket handler is already on Dispatchers.IO; bridge the suspend DAO.
                     runBlocking { photoRepository.savePhoto(photoEntity) }
@@ -292,21 +387,42 @@ class DisplayReceiveServer(
         return baos.toByteArray()
     }
 
-    private fun constantTimeEquals(a: String, b: String): Boolean {
-        if (a.length != b.length) return false
-        var result = 0
-        for (i in a.indices) result = result or (a[i].code xor b[i].code)
-        return result == 0
+    private fun issuePairingChallenge(controllerId: String): String? = synchronized(pairingChallengeLock) {
+        val now = System.currentTimeMillis()
+        val iterator = pairingChallenges.entries.iterator()
+        while (iterator.hasNext()) {
+            if (iterator.next().value.expiresAtMs < now) iterator.remove()
+        }
+        if (pairingChallenges.size >= Constants.MAX_PENDING_PAIRING_CHALLENGES) return@synchronized null
+        val challenge = PairingCrypto.generateNonce()
+        pairingChallenges[challenge] = PairingChallenge(
+            controllerId = controllerId,
+            expiresAtMs = now + Constants.PAIRING_CHALLENGE_TTL_MS
+        )
+        challenge
     }
 
-    private fun isImageBytes(data: ByteArray): Boolean {
-        if (data.size < 4) return false
+    private fun consumePairingChallenge(challenge: String, controllerId: String): Boolean =
+        synchronized(pairingChallengeLock) {
+            val state = pairingChallenges.remove(challenge) ?: return@synchronized false
+            state.controllerId == controllerId && state.expiresAtMs >= System.currentTimeMillis()
+    }
+
+    private fun imageMimeType(data: ByteArray): String? {
+        if (data.size < 4) return null
         val isJpeg = data[0] == 0xFF.toByte() && data[1] == 0xD8.toByte() && data[2] == 0xFF.toByte()
         val isPng = data[0] == 0x89.toByte() && data[1] == 0x50.toByte() &&
             data[2] == 0x4E.toByte() && data[3] == 0x47.toByte()
-        val isWebp = data.size > 12 && data[0] == 'R'.code.toByte() && data[1] == 'I'.code.toByte() &&
-            data[2] == 'F'.code.toByte() && data[3] == 'F'.code.toByte()
-        return isJpeg || isPng || isWebp
+        val isWebp = data.size >= 12 && data[0] == 'R'.code.toByte() && data[1] == 'I'.code.toByte() &&
+            data[2] == 'F'.code.toByte() && data[3] == 'F'.code.toByte() &&
+            data[8] == 'W'.code.toByte() && data[9] == 'E'.code.toByte() &&
+            data[10] == 'B'.code.toByte() && data[11] == 'P'.code.toByte()
+        return when {
+            isJpeg -> "image/jpeg"
+            isPng -> "image/png"
+            isWebp -> "image/webp"
+            else -> null
+        }
     }
 
     private fun sendHttpResponse(

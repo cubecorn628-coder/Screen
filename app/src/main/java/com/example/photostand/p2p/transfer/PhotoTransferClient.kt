@@ -53,38 +53,71 @@ class PhotoTransferClient(private val context: Context) {
         }
     }
 
-    /**
-     * Registers this controller with the display. The display replies with the negotiated
-     * shared key and its BLE identity, which the caller persists for trusted auto-connect.
-     */
+    /** Proves possession of the QR/manual pairing key and registers the controller. */
     suspend fun performHandshake(
         display: DisplayDevice,
         controllerId: String,
         controllerLabel: String
     ): HandshakeResult = withContext(Dispatchers.IO) {
-        if (display.ipAddress.isBlank()) {
+        if (display.ipAddress.isBlank() || display.sharedKey.isBlank() || controllerId.isBlank()) {
             return@withContext HandshakeResult(false)
         }
-        val url = "http://${display.ipAddress}:${display.port}/api/v1/handshake"
+        val baseUrl = "http://${display.ipAddress}:${display.port}"
+        val normalizedLabel = controllerLabel.take(64).replace('\n', ' ').replace('\r', ' ')
         try {
-            val payload = JSONObject().apply {
+            val challengePayload = JSONObject().apply {
                 put("controllerId", controllerId)
-                put("label", controllerLabel)
-                put("key", display.sharedKey)
+                put("label", normalizedLabel)
+                put("v", Constants.PROTOCOL_VERSION)
             }.toString()
-
-            val body = payload.toRequestBody("application/json".toMediaType())
-            val request = Request.Builder().url(url).post(body).build()
-
-            client.newCall(request).execute().use { response ->
+            val challengeRequest = Request.Builder()
+                .url("$baseUrl/api/v1/pairing-challenge")
+                .post(challengePayload.toRequestBody("application/json".toMediaType()))
+                .build()
+            val challengeJson = client.newCall(challengeRequest).execute().use { response ->
+                if (!response.isSuccessful) return@withContext HandshakeResult(false)
+                JSONObject(response.body?.string().orEmpty())
+            }
+            val remoteDisplayId = challengeJson.optString("displayId", "")
+            val challenge = challengeJson.optString("challenge", "")
+            if (remoteDisplayId != display.id || !challenge.matches(Regex("[0-9a-f]{32}"))) {
+                return@withContext HandshakeResult(false)
+            }
+            val proof = PairingCrypto.calculateHmac(
+                PairingCrypto.pairingProofMessage(remoteDisplayId, controllerId, challenge, normalizedLabel),
+                display.sharedKey
+            )
+            val handshakePayload = JSONObject().apply {
+                put("controllerId", controllerId)
+                put("label", normalizedLabel)
+                put("challenge", challenge)
+                put("proof", proof)
+                put("v", Constants.PROTOCOL_VERSION)
+            }.toString()
+            val handshakeRequest = Request.Builder()
+                .url("$baseUrl/api/v1/handshake")
+                .post(handshakePayload.toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(handshakeRequest).execute().use { response ->
                 if (!response.isSuccessful) return@withContext HandshakeResult(false)
                 val json = JSONObject(response.body?.string().orEmpty())
+                if (json.optString("status") != "paired") return@withContext HandshakeResult(false)
+                val displayId = json.optString("displayId", "")
+                val displayName = json.optString("displayName", "")
+                val bleId = json.optString("ble", "")
+                val responseProof = json.optString("proof", "")
+                val responseMessage = PairingCrypto.pairingResponseMessage(
+                    displayId, controllerId, challenge, displayName, bleId
+                )
+                if (displayId != remoteDisplayId ||
+                    !PairingCrypto.verifyHmac(responseMessage, responseProof, display.sharedKey)
+                ) return@withContext HandshakeResult(false)
                 HandshakeResult(
                     success = true,
-                    displayId = json.optString("displayId", display.id),
-                    displayName = json.optString("displayName", display.name),
-                    sharedKey = json.optString("key", display.sharedKey),
-                    bleId = json.optString("ble", display.bleId)
+                    displayId = displayId,
+                    displayName = displayName.ifBlank { display.name },
+                    sharedKey = display.sharedKey,
+                    bleId = bleId.ifBlank { display.bleId }
                 )
             }
         } catch (e: Exception) {
@@ -100,7 +133,7 @@ class PhotoTransferClient(private val context: Context) {
     ): TransferResult = withContext(Dispatchers.IO) {
         if (display.ipAddress.isBlank()) {
             return@withContext TransferResult.Failure(
-                "No network address for ${display.name}. Pair it over WiFi or BLE first.",
+                "No network address for ${display.name}. Connect it to Wi-Fi and pair using its QR code first.",
                 isTimeout = false
             )
         }
@@ -108,14 +141,14 @@ class PhotoTransferClient(private val context: Context) {
         val url = "http://${display.ipAddress}:${display.port}/api/v1/transfer"
 
         val optimizedBytes = compressIfLarge(imageBytes)
+        if (display.sharedKey.isBlank()) {
+            return@withContext TransferResult.Failure("Pair with this display using its QR code before sending photos.")
+        }
         val encryptedBytes = try {
-            if (display.sharedKey.isNotBlank()) {
-                PairingCrypto.encrypt(optimizedBytes, display.sharedKey)
-            } else {
-                optimizedBytes
-            }
+            PairingCrypto.encrypt(optimizedBytes, display.sharedKey)
         } catch (e: Exception) {
-            optimizedBytes
+            Log.e(tag, "Photo encryption failed", e)
+            return@withContext TransferResult.Failure("Could not encrypt the photo for this display.")
         }
 
         var lastError: String? = null
@@ -124,19 +157,20 @@ class PhotoTransferClient(private val context: Context) {
         // Retry transient failures (connection reset, half-open socket, brief AP hiccup).
         repeat(Constants.TRANSFER_MAX_RETRIES) { attempt ->
             val timestamp = System.currentTimeMillis()
-            val signature = if (display.sharedKey.isNotBlank()) {
-                PairingCrypto.calculateHmac(
-                    "$senderDeviceId:$timestamp:${encryptedBytes.size}",
-                    display.sharedKey
-                )
-            } else ""
+            val nonce = PairingCrypto.generateNonce()
+            val signature = PairingCrypto.calculateHmac(
+                PairingCrypto.transferSignatureMessage(senderDeviceId, timestamp, nonce, encryptedBytes.size),
+                display.sharedKey
+            )
 
             val requestBody = encryptedBytes.toRequestBody("application/octet-stream".toMediaType())
             val request = Request.Builder()
                 .url(url)
                 .post(requestBody)
+                .header("X-Protocol-Version", Constants.PROTOCOL_VERSION.toString())
                 .header("X-Sender-Device-Id", senderDeviceId)
                 .header("X-Timestamp", timestamp.toString())
+                .header("X-Nonce", nonce)
                 .header("X-Signature", signature)
                 .build()
 

@@ -205,8 +205,8 @@ class ControllerViewModel(application: Application) : AndroidViewModel(applicati
                 // The GATT token may carry the canonical device id while the placeholder
                 // was stored under "ble:<id>" — drop the stale entry first.
                 if (paired.id != device.id) pairingStore.removeDisplay(paired.id)
-                // Trusted device re-introduced itself over Bluetooth: adopt its fresh
-                // network endpoint and key without user interaction.
+                // A previously paired device reappeared over Bluetooth: refresh public
+                // discovery metadata while retaining its locally stored secret.
                 pairingStore.addOrUpdateDisplay(
                     paired.copy(
                         id = device.id,
@@ -232,7 +232,7 @@ class ControllerViewModel(application: Application) : AndroidViewModel(applicati
 
     /**
      * Builds one de-duplicated discovery list from all three transports:
-     * GATT tokens (richest, contain IP + key) win over mDNS, which wins over raw BLE beacons.
+     * GATT metadata (richest public details) wins over mDNS, which wins over raw BLE beacons.
      */
     private fun rebuildDiscoveredList(
         mdns: List<DisplayDevice>,
@@ -318,20 +318,27 @@ class ControllerViewModel(application: Application) : AndroidViewModel(applicati
                 HandshakeResult(false)
             }
 
-            val paired = if (result.success) {
-                discovered.copy(
-                    id = result.displayId.ifBlank { discovered.id },
-                    name = result.displayName.ifBlank { discovered.name },
-                    sharedKey = result.sharedKey.ifBlank { discovered.sharedKey },
-                    bleId = result.bleId.ifBlank { discovered.bleId },
-                    isOnline = true,
-                    autoConnect = true
-                )
-            } else {
-                // BLE-only devices (no IP yet) are still saved as trusted; a GATT token
-                // or mDNS resolution will fill the network endpoint automatically.
-                discovered.copy(isOnline = discovered.ipAddress.isNotBlank(), autoConnect = true)
+            if (!result.success) {
+                _uiState.update {
+                    it.copy(
+                        isSending = false,
+                        sendingMessage = "",
+                        lastTransferResult = TransferResult.Failure(
+                            "Pairing could not be verified. Scan or enter the display's QR pairing token."
+                        )
+                    )
+                }
+                return@launch
             }
+
+            val paired = discovered.copy(
+                id = result.displayId.ifBlank { discovered.id },
+                name = result.displayName.ifBlank { discovered.name },
+                sharedKey = result.sharedKey,
+                bleId = result.bleId.ifBlank { discovered.bleId },
+                isOnline = true,
+                autoConnect = true
+            )
             pairingStore.addOrUpdateDisplay(paired)
             autoHandshakeAttempted.add(paired.id)
 

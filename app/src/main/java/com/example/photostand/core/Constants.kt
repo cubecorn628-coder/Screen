@@ -21,10 +21,14 @@ object Constants {
     const val BLE_GATT_RETRY_COOLDOWN_MS = 60_000L
 
     // Transfer Protocol
-    const val PROTOCOL_VERSION = 2
+    const val PROTOCOL_VERSION = 3
     const val TRANSFER_TIMEOUT_MS = 60_000L
     const val MAX_IMAGE_BYTES = 25 * 1024 * 1024 // 25MB max
     const val TRANSFER_MAX_RETRIES = 2
+    const val AUTH_CLOCK_SKEW_MS = 5 * 60 * 1000L
+    const val PAIRING_CHALLENGE_TTL_MS = 60_000L
+    const val MAX_PENDING_PAIRING_CHALLENGES = 256
+    const val MAX_RECORDED_TRANSFER_NONCES = 2048
 
     // SharedPreferences Keys
     const val PREFS_NAME = "photostand_prefs"
@@ -35,6 +39,7 @@ object Constants {
     const val KEY_BLE_ID = "ble_id"
     const val KEY_PAIRED_DISPLAYS = "paired_displays"
     const val KEY_PAIRED_CONTROLLERS = "paired_controllers"
+    const val KEY_TRANSFER_REPLAY_STATE = "transfer_replay_state"
     const val KEY_BRIGHTNESS = "display_brightness"
     const val KEY_AUTO_DIM = "display_auto_dim"
     const val KEY_FIT_MODE = "display_fit_mode"
