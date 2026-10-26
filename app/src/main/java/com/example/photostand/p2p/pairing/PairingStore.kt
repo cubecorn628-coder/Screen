@@ -238,7 +238,6 @@ class PairingStore(context: Context) {
             })
             prefs.edit().putString(Constants.KEY_TRANSFER_REPLAY_STATE, retained.toString()).commit()
         }
-    }
 
     private fun loadPairedControllers(): List<PairedController> {
         val raw = prefs.getString(Constants.KEY_PAIRED_CONTROLLERS, "[]") ?: "[]"

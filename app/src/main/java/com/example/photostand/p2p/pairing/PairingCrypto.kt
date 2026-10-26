@@ -121,6 +121,12 @@ object PairingCrypto {
             signature.toByteArray(Charsets.US_ASCII)
         )
     }
+
+    fun constantTimeEquals(left: String, right: String): Boolean =
+        MessageDigest.isEqual(
+            left.toByteArray(Charsets.UTF_8),
+            right.toByteArray(Charsets.UTF_8)
+        )
     // endregion
 
     private fun deriveKeyBytes(base64Key: String): ByteArray {
